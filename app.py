@@ -226,22 +226,43 @@ def _openai_chat(prompt: str, system: str = "", max_tokens: int = 600) -> str:
     except Exception as e:
         return f"[OpenAI 오류] {e}"
 
-def get_executive_summary(df: pd.DataFrame, perf: dict) -> str:
-    total = len(df)
-    vh    = (df['risk_grade'] == 'Very High').sum()
-    hi    = (df['risk_grade'] == 'High').sum()
-    top_stn = df.groupby('nearest_station')['final_risk'].mean().idxmax()
+def get_executive_summary(df: pd.DataFrame, perf: dict, lang: str = 'ko') -> str:
+    total    = len(df)
+    vh       = (df['risk_grade'] == 'Very High').sum()
+    hi       = (df['risk_grade'] == 'High').sum()
+    top_stn  = df.groupby('nearest_station')['final_risk'].mean().idxmax()
     top_mean = df.groupby('nearest_station')['final_risk'].mean().max()
-    auc = perf.get('model_perf', pd.DataFrame()).get('auc', pd.Series([0])).max()
+    auc      = perf.get('model_perf', pd.DataFrame()).get('auc', pd.Series([0])).max()
 
-    default = (
-        f"강원도 전력설비 {total:,}개를 분석한 결과, {vh:,}개({vh/total*100:.1f}%)가 "
-        f"Very High(매우높음) 등급으로 즉각적인 점검이 필요합니다. "
-        f"위험도가 가장 높은 권역은 {top_stn}(평균 {top_mean:.1f}점)이며, "
-        f"주요 위험 요인은 산림 인접도와 건조·강풍 기상 조건의 복합 작용입니다. "
-        f"LightGBM 모델의 예측 정확도(AUC)는 {auc:.4f}입니다."
-    )
-    prompt = f"""강원도 전력설비 화재위험도 분석 결과를 현장 관리자 및 경영진을 위한 총평으로 3~4문장 작성하세요.
+    if lang == 'en':
+        default = (
+            f"Analysis of {total:,} power facilities in Gangwon Province shows {vh:,} ({vh/total*100:.1f}%) "
+            f"classified as Very High risk, requiring immediate inspection. "
+            f"The highest-risk area is {top_stn} station (avg. score {top_mean:.1f}/100). "
+            f"Key risk factors include forest proximity, dry/windy weather, and terrain exposure. "
+            f"LightGBM model AUC: {auc:.4f}."
+        )
+        prompt = f"""Write a 3-4 sentence executive summary of power facility fire risk analysis for field managers and executives.
+Include numerical evidence, key risk factors, and actionable recommendations.
+
+Analysis Data:
+- Total facilities: {total:,} (Gangwon Province power poles)
+- Very High grade: {vh:,} ({vh/total*100:.1f}%)
+- High grade: {hi:,} ({hi/total*100:.1f}%)
+- Highest-risk station area: {top_stn} (avg. risk {top_mean:.1f}/100)
+- LightGBM AUC: {auc:.4f}
+- Risk factors: Weather hazard (dry/wind) 35%, Forest/terrain 30%, Facility exposure 25%, Fire history 10%
+- Analysis period: 2022–2024 (3 years)"""
+        system = "You are a power facility fire risk expert. Answer concisely and accurately in English."
+    else:
+        default = (
+            f"강원도 전력설비 {total:,}개를 분석한 결과, {vh:,}개({vh/total*100:.1f}%)가 "
+            f"Very High(매우높음) 등급으로 즉각적인 점검이 필요합니다. "
+            f"위험도가 가장 높은 권역은 {top_stn}(평균 {top_mean:.1f}점)이며, "
+            f"주요 위험 요인은 산림 인접도와 건조·강풍 기상 조건의 복합 작용입니다. "
+            f"LightGBM 모델의 예측 정확도(AUC)는 {auc:.4f}입니다."
+        )
+        prompt = f"""강원도 전력설비 화재위험도 분석 결과를 현장 관리자 및 경영진을 위한 총평으로 3~4문장 작성하세요.
 수치 근거를 반드시 포함하고, 핵심 위험요인과 권고사항도 포함하세요.
 
 분석 데이터:
@@ -252,56 +273,94 @@ def get_executive_summary(df: pd.DataFrame, perf: dict) -> str:
 - LightGBM 예측 AUC: {auc:.4f}
 - 주요 위험요인: 기상위험(건조·강풍) 35%, 산림·지형 노출 30%, 설비 노출 25%, 화재이력 10%
 - 분석 기간: 2022~2024년 (3년)"""
+        system = "당신은 전력설비 화재 위험 전문가입니다. 한국어로 간결하고 정확하게 답변하세요."
 
-    result = _openai_chat(prompt, system="당신은 전력설비 화재 위험 전문가입니다. 한국어로 간결하고 정확하게 답변하세요.")
+    result = _openai_chat(prompt, system=system)
     return result if result and not result.startswith("[OpenAI") else default
 
-def get_facility_explanation(row: dict) -> str:
-    grade_kr = GRADE_KR.get(row.get('risk_grade', ''), '')
-    default = (
-        f"설비 #{row.get('pole_id','')}은(는) 기상위험 {row.get('weather_hazard',0):.0f}점, "
-        f"공간노출 {row.get('spatial_exposure',0):.0f}점이 주요 위험요인으로, "
-        f"{grade_kr} 등급({row.get('final_risk',0):.1f}점)입니다. "
-        f"절연 저항 측정 및 현장 점검이 권고됩니다."
-    )
-    prompt = f"""전력설비 화재위험 분석 결과를 현장 점검 엔지니어용으로 3문장 설명하세요.
+
+def get_facility_explanation(row: dict, lang: str = 'ko') -> str:
+    grade_label = (GRADE_KR if lang == 'ko' else GRADE_EN).get(row.get('risk_grade', ''), '')
+    if lang == 'en':
+        default = (
+            f"Facility #{row.get('pole_id','')} has weather hazard {row.get('weather_hazard',0):.0f} "
+            f"and spatial exposure {row.get('spatial_exposure',0):.0f} as primary risk factors. "
+            f"Grade: {grade_label} ({row.get('final_risk',0):.1f}/100). "
+            f"Recommend insulation resistance test and on-site inspection."
+        )
+        prompt = f"""Explain this power facility fire risk analysis in 3 sentences for a field inspection engineer.
+Do not add information beyond the given values.
+
+Facility ID: {row.get('pole_id','')}
+Risk Grade: {grade_label} ({row.get('final_risk',0):.1f}/100)
+ML Fire Probability Score: {row.get('ml_score',0):.1f}/100
+Weather Hazard: {row.get('weather_hazard',0):.1f} | Spatial Exposure: {row.get('spatial_exposure',0):.1f}
+Facility Exposure: {row.get('facility_exposure',0):.1f} | Fire History: {row.get('hist_prior',0):.1f}
+Station Area: {row.get('nearest_station','')}
+Include specific preventive actions."""
+        system = "You are a power facility safety inspection expert. Answer in English."
+    else:
+        default = (
+            f"설비 #{row.get('pole_id','')}은(는) 기상위험 {row.get('weather_hazard',0):.0f}점, "
+            f"공간노출 {row.get('spatial_exposure',0):.0f}점이 주요 위험요인으로, "
+            f"{grade_label} 등급({row.get('final_risk',0):.1f}점)입니다. "
+            f"절연 저항 측정 및 현장 점검이 권고됩니다."
+        )
+        prompt = f"""전력설비 화재위험 분석 결과를 현장 점검 엔지니어용으로 3문장 설명하세요.
 수치 범위를 벗어난 내용을 추가하지 마세요.
 
 설비ID: {row.get('pole_id','')}
-위험등급: {grade_kr} ({row.get('final_risk',0):.1f}/100)
+위험등급: {grade_label} ({row.get('final_risk',0):.1f}/100)
 ML 화재확률 점수: {row.get('ml_score',0):.1f}/100
 기상위험: {row.get('weather_hazard',0):.1f} | 공간노출: {row.get('spatial_exposure',0):.1f}
 설비노출: {row.get('facility_exposure',0):.1f} | 화재이력: {row.get('hist_prior',0):.1f}
 관할관측소: {row.get('nearest_station','')}
 권고사항: 현장 점검 및 예방 조치를 구체적으로 포함"""
-    result = _openai_chat(prompt, system="당신은 전력설비 안전 점검 전문가입니다.", max_tokens=300)
+        system = "당신은 전력설비 안전 점검 전문가입니다."
+
+    result = _openai_chat(prompt, system=system, max_tokens=300)
     return result if result and not result.startswith("[OpenAI") else default
 
-def get_overall_forecast_recommendation(fc_result: pd.DataFrame, fc_feat: pd.DataFrame) -> str:
-    """3일 전체 예보 종합 권고 (OpenAI)"""
+
+def get_overall_forecast_recommendation(fc_result: pd.DataFrame, fc_feat: pd.DataFrame,
+                                         lang: str = 'ko') -> str:
     if fc_result is None or fc_result.empty:
         return ""
     dates = sorted(fc_result['fcst_date'].unique())
     today = pd.Timestamp.now()
+    day_labels = {0: ("오늘","Today"), 1: ("내일","Tomorrow"), 2: ("모레","Day+2")}
 
     lines = []
     for d in dates:
         dt   = pd.to_datetime(d, format="%Y%m%d")
         diff = (dt - today.normalize()).days
-        lbl  = {0:"오늘",1:"내일",2:"모레"}.get(diff, dt.strftime("%m/%d"))
+        lbl  = day_labels.get(diff, (dt.strftime("%m/%d"), dt.strftime("%m/%d")))[0 if lang=='ko' else 1]
         day  = fc_result[fc_result['fcst_date'] == d]
         vh   = (day['forecast_grade'] == 'Very High').sum()
         hi   = (day['forecast_grade'] == 'High').sum()
         feat = fc_feat[fc_feat['fcst_date'] == d] if fc_feat is not None else pd.DataFrame()
         wh_max = feat['weather_hazard'].max() if not feat.empty else 0
-        lines.append(f"- {lbl}({dt.strftime('%m.%d')}): Very High {vh:,}개, High {hi:,}개, 최대기상위험도 {wh_max:.1f}")
+        if lang == 'en':
+            lines.append(f"- {lbl} ({dt.strftime('%m/%d')}): Very High {vh:,}, High {hi:,}, Max hazard {wh_max:.1f}")
+        else:
+            lines.append(f"- {lbl}({dt.strftime('%m.%d')}): Very High {vh:,}개, High {hi:,}개, 최대기상위험도 {wh_max:.1f}")
 
-    default = (
-        f"향후 3일간 예보 분석:\n" + "\n".join(lines) +
-        "\n\n가장 위험도가 높은 날에 현장 점검 자원을 집중 배치하고, "
-        "건조주의보 발령 권역의 설비는 사전 절연 점검을 권고합니다."
-    )
-    prompt = f"""향후 3일간 강원도 전력설비 화재 위험 예보를 분석하여 경영진과 현장 관리자를 위한 종합 권고문을 작성하세요.
+    if lang == 'en':
+        default = "3-Day Forecast Summary:\n" + "\n".join(lines) + \
+                  "\n\nConcentrate inspection resources on the highest-risk day. " \
+                  "Pre-check insulation in dry-alert zones."
+        prompt = f"""Analyze the 3-day Gangwon power facility fire risk forecast and write a comprehensive recommendation for executives and field managers.
+
+Forecast summary:
+{chr(10).join(lines)}
+
+Include: 1) Overall 3-day risk trend, 2) Most dangerous day and reason, 3) Priority inspection areas and facility types, 4) 3 specific preventive actions, 5) Resource allocation recommendation."""
+        system = "You are a power facility fire prevention expert. Answer in 5-7 sentences in English."
+    else:
+        default = "향후 3일간 예보 분석:\n" + "\n".join(lines) + \
+                  "\n\n가장 위험도가 높은 날에 현장 점검 자원을 집중 배치하고, " \
+                  "건조주의보 발령 권역의 설비는 사전 절연 점검을 권고합니다."
+        prompt = f"""향후 3일간 강원도 전력설비 화재 위험 예보를 분석하여 경영진과 현장 관리자를 위한 종합 권고문을 작성하세요.
 
 예보 요약:
 {chr(10).join(lines)}
@@ -312,27 +371,45 @@ def get_overall_forecast_recommendation(fc_result: pd.DataFrame, fc_feat: pd.Dat
 3. 우선 점검 권역 및 설비 유형
 4. 예방 조치 3가지 (구체적이고 실행 가능한 것)
 5. 자원 배치 권고"""
-    result = _openai_chat(prompt,
-        system="당신은 전력설비 화재 예방 전문가입니다. 한국어 5~7문장으로 답변하세요.",
-        max_tokens=500)
+        system = "당신은 전력설비 화재 예방 전문가입니다. 한국어 5~7문장으로 답변하세요."
+
+    result = _openai_chat(prompt, system=system, max_tokens=500)
     return result if result and not result.startswith("[OpenAI") else default
 
+
 def get_forecast_recommendation(feat_df: pd.DataFrame, fc_day: pd.DataFrame,
-                                 date_label: str) -> str:
+                                 date_label: str, lang: str = 'ko') -> str:
     if feat_df is None or fc_day.empty:
         return ""
     top_stn = feat_df.groupby('station')['weather_hazard'].mean().idxmax() \
-              if not feat_df.empty else "알 수 없음"
+              if not feat_df.empty else ("알 수 없음" if lang == 'ko' else "Unknown")
     vh_cnt = (fc_day['forecast_grade'] == 'Very High').sum()
     hi_cnt = (fc_day['forecast_grade'] == 'High').sum()
 
-    feat_row = feat_df.iloc[0] if not feat_df.empty else {}
-    default = (
-        f"{date_label} 기상 예보 기준, {top_stn} 권역이 최고 기상위험도를 보입니다. "
-        f"Very High 등급 예측 설비 {vh_cnt:,}개, High 등급 {hi_cnt:,}개로, "
-        f"건조주의보 발령 조건에 해당하는 구역의 설비 긴급 점검이 필요합니다."
-    )
-    prompt = f"""{date_label} 기상 예보 기반 전력설비 화재 위험 예보 분석 결과를 작성하세요.
+    if lang == 'en':
+        default = (
+            f"For {date_label}, {top_stn} station area shows the highest weather hazard. "
+            f"{vh_cnt:,} facilities predicted Very High, {hi_cnt:,} High. "
+            f"Urgent inspection required in dry-alert condition zones."
+        )
+        prompt = f"""Write a fire risk forecast analysis for {date_label} based on weather data.
+Include: 1) Which areas/facilities are at risk, 2) Key weather conditions, 3) 3 specific preventive actions.
+
+Forecast date: {date_label}
+Highest-risk station: {top_stn}
+Very High predicted: {vh_cnt:,} facilities
+High predicted: {hi_cnt:,} facilities
+Max weather hazard: {feat_df['weather_hazard'].max():.1f}/100
+Dry-alert stations: {int(feat_df['dry_watch_flag'].sum()) if 'dry_watch_flag' in feat_df.columns else 0}
+Wind-alert stations: {int(feat_df['wind_watch_flag'].sum()) if 'wind_watch_flag' in feat_df.columns else 0}"""
+        system = "You are a power facility fire prevention expert. Answer in 3-5 sentences in English."
+    else:
+        default = (
+            f"{date_label} 기상 예보 기준, {top_stn} 권역이 최고 기상위험도를 보입니다. "
+            f"Very High 등급 예측 설비 {vh_cnt:,}개, High 등급 {hi_cnt:,}개로, "
+            f"건조주의보 발령 조건에 해당하는 구역의 설비 긴급 점검이 필요합니다."
+        )
+        prompt = f"""{date_label} 기상 예보 기반 전력설비 화재 위험 예보 분석 결과를 작성하세요.
 다음 내용을 반드시 포함하세요:
 1. 어떤 권역/설비가 위험에 노출되는지
 2. 주요 위험 기상 조건
@@ -340,23 +417,24 @@ def get_forecast_recommendation(feat_df: pd.DataFrame, fc_day: pd.DataFrame,
 
 예보 날짜: {date_label}
 최고위험 권역: {top_stn}
-Very High 예측 설비: {vh_cnt:,}개
-High 예측 설비: {hi_cnt:,}개
+Very High 예측 설비: {vh_cnt:,}개 / High: {hi_cnt:,}개
 최대 기상위험도: {feat_df['weather_hazard'].max():.1f}/100
-건조주의보 관측소 수: {int(feat_df['dry_watch_flag'].sum()) if 'dry_watch_flag' in feat_df.columns else 0}개소
-강풍주의보 관측소 수: {int(feat_df['wind_watch_flag'].sum()) if 'wind_watch_flag' in feat_df.columns else 0}개소"""
-    result = _openai_chat(prompt, system="당신은 전력설비 화재 예방 전문가입니다. 한국어 3~5문장으로 답변하세요.", max_tokens=400)
+건조주의보 관측소: {int(feat_df['dry_watch_flag'].sum()) if 'dry_watch_flag' in feat_df.columns else 0}개소
+강풍주의보 관측소: {int(feat_df['wind_watch_flag'].sum()) if 'wind_watch_flag' in feat_df.columns else 0}개소"""
+        system = "당신은 전력설비 화재 예방 전문가입니다. 한국어 3~5문장으로 답변하세요."
+
+    result = _openai_chat(prompt, system=system, max_tokens=400)
     return result if result and not result.startswith("[OpenAI") else default
 
 # ── 위험 판단 사유 생성 (규칙 기반) ──────────────────────────────────────────
 def _risk_reason(row: dict) -> str:
-    """4개 컴포넌트 점수를 분석해 이해하기 쉬운 판단 사유 반환"""
+    """4개 컴포넌트 점수를 분석해 이해하기 쉬운 판단 사유 반환 (언어 자동 감지)"""
     wh = float(row.get('weather_hazard',   0))
     sp = float(row.get('spatial_exposure', 0))
     fe = float(row.get('facility_exposure',0))
     hp = float(row.get('hist_prior',       0))
+    _lang = st.session_state.get('lang', 'ko')
 
-    # 가중 점수 기준 주요/보조 요인 순위
     weighted = {
         'weather':  wh * WEIGHTS['weather'],
         'spatial':  sp * WEIGHTS['spatial'],
@@ -366,51 +444,68 @@ def _risk_reason(row: dict) -> str:
     ranked = sorted(weighted, key=weighted.get, reverse=True)
     top1, top2 = ranked[0], ranked[1]
 
-    # 요인별 자연어 설명 (점수 수준에 따라 차별화)
-    def _wh_text(v):
-        if v >= 80: return "건조·강풍 조건이 매우 심각해 화재 발화·확산 위험이 극도로 높습니다"
-        if v >= 65: return "습도가 낮고 바람이 강해 불씨가 발생하면 빠르게 번질 수 있는 조건입니다"
-        return "기상 조건이 다소 건조하거나 바람이 있어 주의가 필요합니다"
-
-    def _sp_text(v):
-        if v >= 75: return "반경 내 산림 비율이 높고 경사가 가팔라 화재 시 대규모 확산이 우려됩니다"
-        if v >= 55: return "산림과 인접하고 지형상 화재가 퍼지기 쉬운 구조입니다"
-        return "주변에 산림이 일부 있어 화재 확산 가능성이 존재합니다"
-
-    def _fe_text(v):
-        if v >= 75: return "주변에 전력설비가 밀집되어 있어 연쇄 피해 가능성이 큽니다"
-        if v >= 55: return "인근 설비 밀도가 높아 한 곳에서 화재 발생 시 파급 범위가 넓습니다"
-        return "설비 노출 수준이 보통이나 지속 모니터링이 필요합니다"
-
-    def _hp_text(v):
-        if v >= 65: return "이 지역은 과거에도 전기화재·산불이 반복 발생한 이력이 있는 고위험 구역입니다"
-        if v >= 50: return "과거 화재 이력이 있어 위험 패턴이 반복될 가능성이 있습니다"
-        return "과거 화재 이력은 낮으나 다른 요인이 위험을 높이고 있습니다"
+    if _lang == 'en':
+        def _wh_text(v):
+            if v >= 80: return "Extremely dry and windy conditions — very high fire ignition and spread risk"
+            if v >= 65: return "Low humidity and strong winds create conditions for rapid fire spread"
+            return "Moderately dry or windy conditions — monitor closely"
+        def _sp_text(v):
+            if v >= 75: return "High forest coverage and steep slope — large-scale spread likely if fire occurs"
+            if v >= 55: return "Adjacent to forest with terrain favoring fire propagation"
+            return "Some nearby forest — limited but present fire spread potential"
+        def _fe_text(v):
+            if v >= 75: return "Dense cluster of facilities nearby — high cascading failure risk"
+            if v >= 55: return "High local facility density — wide impact zone if fire occurs"
+            return "Moderate facility exposure — continuous monitoring recommended"
+        def _hp_text(v):
+            if v >= 65: return "Repeat fire incidents (electrical + wildfire) recorded in this zone"
+            if v >= 50: return "Some fire history — risk pattern may recur"
+            return "Low fire history, but other factors elevate risk"
+        labels = {'weather':'Weather','spatial':'Terrain','facility':'Facility','prior':'History'}
+        _main, _sub = '[Main]', '[Sub]'
+        flags_map = {
+            wh >= 75: "🚨 Extreme Weather",
+            sp >= 70: "🌲 High Forest Risk",
+            hp >= 60: "🔥 Repeat Fire Zone",
+            fe >= 75: "⚡ Dense Facility Zone",
+        }
+    else:
+        def _wh_text(v):
+            if v >= 80: return "건조·강풍 조건이 매우 심각해 화재 발화·확산 위험이 극도로 높습니다"
+            if v >= 65: return "습도가 낮고 바람이 강해 불씨가 발생하면 빠르게 번질 수 있는 조건입니다"
+            return "기상 조건이 다소 건조하거나 바람이 있어 주의가 필요합니다"
+        def _sp_text(v):
+            if v >= 75: return "반경 내 산림 비율이 높고 경사가 가팔라 화재 시 대규모 확산이 우려됩니다"
+            if v >= 55: return "산림과 인접하고 지형상 화재가 퍼지기 쉬운 구조입니다"
+            return "주변에 산림이 일부 있어 화재 확산 가능성이 존재합니다"
+        def _fe_text(v):
+            if v >= 75: return "주변에 전력설비가 밀집되어 있어 연쇄 피해 가능성이 큽니다"
+            if v >= 55: return "인근 설비 밀도가 높아 한 곳에서 화재 발생 시 파급 범위가 넓습니다"
+            return "설비 노출 수준이 보통이나 지속 모니터링이 필요합니다"
+        def _hp_text(v):
+            if v >= 65: return "이 지역은 과거에도 전기화재·산불이 반복 발생한 이력이 있는 고위험 구역입니다"
+            if v >= 50: return "과거 화재 이력이 있어 위험 패턴이 반복될 가능성이 있습니다"
+            return "과거 화재 이력은 낮으나 다른 요인이 위험을 높이고 있습니다"
+        labels = {'weather':'기상','spatial':'지형','facility':'설비','prior':'이력'}
+        _main, _sub = '[주요]', '[보조]'
+        flags_map = {
+            wh >= 75: "🚨 극고위험 기상",
+            sp >= 70: "🌲 고위험 산림노출",
+            hp >= 60: "🔥 반복 화재지역",
+            fe >= 75: "⚡ 설비 밀집위험",
+        }
 
     text_fn = {'weather': _wh_text, 'spatial': _sp_text,
                'facility': _fe_text, 'prior': _hp_text}
-    vals    = {'weather': wh, 'spatial': sp, 'facility': fe, 'prior': hp}
-    labels  = {'weather':'기상','spatial':'지형','facility':'설비','prior':'이력'}
-
-    # lang 파악 (session_state)
-    _lang = st.session_state.get('lang', 'ko')
-    _main = '[주요]' if _lang == 'ko' else '[Main]'
-    _sub  = '[보조]' if _lang == 'ko' else '[Sub]'
+    vals = {'weather': wh, 'spatial': sp, 'facility': fe, 'prior': hp}
 
     reason = (
         f"<b>{_main}</b> {labels[top1]}: {text_fn[top1](vals[top1])}<br>"
         f"<b>{_sub}</b> {labels[top2]}: {text_fn[top2](vals[top2])}"
     )
-
-    # 임계값 초과 경보 플래그
-    flags = []
-    if wh >= 75: flags.append("🚨 극고위험 기상")
-    if sp >= 70: flags.append("🌲 고위험 산림노출")
-    if hp >= 60: flags.append("🔥 반복 화재지역")
-    if fe >= 75: flags.append("⚡ 설비 밀집위험")
+    flags = [v for k, v in flags_map.items() if k]
     if flags:
         reason += "<br><b>" + " &nbsp; ".join(flags) + "</b>"
-
     return reason
 
 
@@ -431,24 +526,33 @@ def build_map(df_merged, selected_grades, risk_col='final_risk', max_points=3000
             name=f"{GRADE_EMOJI[grade]} {GRADE_KR[grade]} ({total_cnt:,}개)")
         for _, row in subset.iterrows():
             reason = _risk_reason(row)
+            _lang_p  = st.session_state.get('lang', 'ko')
+            _glabel  = (GRADE_KR if _lang_p == 'ko' else GRADE_EN)[grade]
+            _fac_lbl = '설비' if _lang_p == 'ko' else 'Facility'
+            _wh_lbl  = '🌪️ 기상위험' if _lang_p == 'ko' else '🌪️ Weather'
+            _sp_lbl  = '🌲 공간노출' if _lang_p == 'ko' else '🌲 Spatial'
+            _fe_lbl  = '⚡ 설비노출' if _lang_p == 'ko' else '⚡ Facility'
+            _hp_lbl  = '🔥 화재이력' if _lang_p == 'ko' else '🔥 History'
+            _ml_lbl  = '🤖 ML점수'   if _lang_p == 'ko' else '🤖 ML Score'
+            _stn_lbl = '관측소 권역'  if _lang_p == 'ko' else 'Station Area'
             popup_html = (
                 f"<div style='min-width:220px;font-size:12px'>"
-                f"<b style='font-size:13px'>설비 #{int(row['pole_id'])}</b><br>"
+                f"<b style='font-size:13px'>{_fac_lbl} #{int(row['pole_id'])}</b><br>"
                 f"<span style='color:{color};font-weight:bold'>"
-                f"  {GRADE_EMOJI[grade]} {GRADE_KR[grade]}</span>"
+                f"  {GRADE_EMOJI[grade]} {_glabel}</span>"
                 f" &nbsp;<b>{row[risk_col]:.1f}</b>/100<br>"
                 f"<hr style='margin:4px 0'>"
                 f"<table style='width:100%;font-size:11px'>"
-                f"<tr><td>🌪️ 기상위험</td><td><b>{row.get('weather_hazard',0):.0f}</b></td>"
-                f"    <td>🌲 공간노출</td><td><b>{row.get('spatial_exposure',0):.0f}</b></td></tr>"
-                f"<tr><td>⚡ 설비노출</td><td><b>{row.get('facility_exposure',0):.0f}</b></td>"
-                f"    <td>🔥 화재이력</td><td><b>{row.get('hist_prior',0):.0f}</b></td></tr>"
-                f"<tr><td>🤖 ML점수</td><td colspan='3'><b>{row.get('ml_score',0):.1f}</b></td></tr>"
+                f"<tr><td>{_wh_lbl}</td><td><b>{row.get('weather_hazard',0):.0f}</b></td>"
+                f"    <td>{_sp_lbl}</td><td><b>{row.get('spatial_exposure',0):.0f}</b></td></tr>"
+                f"<tr><td>{_fe_lbl}</td><td><b>{row.get('facility_exposure',0):.0f}</b></td>"
+                f"    <td>{_hp_lbl}</td><td><b>{row.get('hist_prior',0):.0f}</b></td></tr>"
+                f"<tr><td>{_ml_lbl}</td><td colspan='3'><b>{row.get('ml_score',0):.1f}</b></td></tr>"
                 f"</table>"
                 f"<hr style='margin:4px 0'>"
                 f"<div style='color:#555;font-size:11px'>{reason}</div>"
                 f"<div style='color:#888;font-size:10px;margin-top:2px'>"
-                f"📍 {row.get('nearest_station','')} 관측소 권역</div>"
+                f"📍 {row.get('nearest_station','')} {_stn_lbl}</div>"
                 f"</div>"
             )
             folium.CircleMarker(
@@ -691,9 +795,13 @@ def main():
     # ── 총평 (OpenAI) ─────────────────────────────────────────────────────────
     with st.container():
         st.markdown(t('summary_title', lang))
-        if 'executive_summary' not in st.session_state:
-            with st.spinner("OpenAI가 현황을 분석 중..."):
-                st.session_state['executive_summary'] = get_executive_summary(df, perf)
+        # lang 변경 시 기존 캐시 무효화
+        cached_lang = st.session_state.get('executive_summary_lang', '')
+        if 'executive_summary' not in st.session_state or cached_lang != lang:
+            spinner_msg = "Analyzing with OpenAI..." if lang == 'en' else "OpenAI가 현황을 분석 중..."
+            with st.spinner(spinner_msg):
+                st.session_state['executive_summary'] = get_executive_summary(df, perf, lang)
+                st.session_state['executive_summary_lang'] = lang
 
         summary = st.session_state['executive_summary']
         icon = "🤖" if OPENAI_API_KEY else "📊"
@@ -760,7 +868,8 @@ def main():
 
         c1, c2, c3 = st.columns(3)
         total_risk = df_view['final_risk'].sum()
-        topk_risk  = top_df['WPFI점수'].sum()
+        wpfi_col_name = t('wpfi_col', lang)
+        topk_risk  = top_df[wpfi_col_name].sum() if wpfi_col_name in top_df.columns else 0
         coverage   = topk_risk / total_risk * 100 if total_risk > 0 else 0
         c1.metric(t('coverage', lang), f"{coverage:.1f}%")
         if 'recall_k' in perf:
@@ -804,13 +913,15 @@ def main():
                 </div>
                 """, unsafe_allow_html=True)
 
-                st.markdown("**📊 4-Layer 위험 점수**")
-                layers = [
-                    ('🌪️ 기상위험',  'weather_hazard'),
-                    ('🌲 공간노출',  'spatial_exposure'),
-                    ('⚡ 설비노출',  'facility_exposure'),
-                    ('🔥 화재이력',  'hist_prior'),
-                ]
+                st.markdown(t('layer_scores', lang))
+                if lang == 'en':
+                    layers = [('🌪️ Weather Hazard','weather_hazard'),('🌲 Spatial Exposure','spatial_exposure'),
+                              ('⚡ Facility Exposure','facility_exposure'),('🔥 Fire History','hist_prior')]
+                    ml_lbl = "🤖 ML Fire Prob. Score"
+                else:
+                    layers = [('🌪️ 기상위험','weather_hazard'),('🌲 공간노출','spatial_exposure'),
+                              ('⚡ 설비노출','facility_exposure'),('🔥 화재이력','hist_prior')]
+                    ml_lbl = "🤖 ML 화재확률 점수"
                 for label, col_name in layers:
                     val = row.get(col_name, 0)
                     bar_color = '#d62728' if val >= 70 else '#ff7f0e' if val >= 50 else '#2ca02c'
@@ -821,131 +932,180 @@ def main():
                         f"</div></div>", unsafe_allow_html=True)
 
                 if 'ml_score' in row:
-                    st.metric("🤖 ML 화재확률 점수", f"{row['ml_score']:.1f}/100")
+                    st.metric(ml_lbl, f"{row['ml_score']:.1f}/100")
 
             with col2:
-                st.markdown("**🔬 SHAP 기여도 분석**")
+                st.markdown(t('shap_title', lang))
                 if model and features:
-                    with st.spinner("SHAP 계산 중..."):
+                    spin_shap = "Computing SHAP..." if lang == 'en' else "SHAP 계산 중..."
+                    with st.spinner(spin_shap):
                         fig_shap = shap_waterfall(sel_pole, df_view, model, features)
                     if fig_shap:
                         st.pyplot(fig_shap)
                         plt.close()
                     else:
                         fig, ax = plt.subplots(figsize=(6, 3.5))
-                        comp_labels = ['기상위험','공간노출','설비노출','화재이력']
+                        if lang == 'en':
+                            comp_labels = ['Weather Hazard','Spatial Exposure','Facility Exposure','Fire History']
+                            x_label, t_label = 'Score', f'Facility #{sel_pole} Risk Components'
+                        else:
+                            comp_labels = ['기상위험','공간노출','설비노출','화재이력']
+                            x_label, t_label = '점수', f'설비 #{sel_pole} 위험 구성요소'
                         comp_vals = [row.get('weather_hazard',0), row.get('spatial_exposure',0),
                                      row.get('facility_exposure',0), row.get('hist_prior',0)]
                         ax.barh(comp_labels, comp_vals, color=['#d62728','#ff7f0e','#1f77b4','#2ca02c'])
                         for b, v in zip(ax.patches, comp_vals):
                             ax.text(v + 0.5, b.get_y() + b.get_height()/2, f'{v:.1f}', va='center')
-                        ax.set_xlabel('점수'); ax.set_xlim(0, 110)
-                        ax.set_title(f'설비 #{sel_pole} 위험 구성요소')
+                        ax.set_xlabel(x_label); ax.set_xlim(0, 110)
+                        ax.set_title(t_label)
                         plt.tight_layout(); st.pyplot(fig); plt.close()
 
                 # AI 설명 — 항상 표시
                 st.markdown("**🤖 AI 위험 설명**")
-                exp_key = f"exp_{sel_pole}"
+                exp_key = f"exp_{sel_pole}_{lang}"
                 if exp_key not in st.session_state:
-                    with st.spinner("분석 중..."):
-                        st.session_state[exp_key] = get_facility_explanation(row.to_dict())
+                    spin_msg = "Analyzing..." if lang == 'en' else "분석 중..."
+                    with st.spinner(spin_msg):
+                        st.session_state[exp_key] = get_facility_explanation(row.to_dict(), lang)
                 st.info(st.session_state[exp_key])
 
     # ── TAB 4: 모델 성능 ─────────────────────────────────────────────────────
     with tab4:
         st.markdown("##### 📊 LightGBM 모델 성능 검증")
 
-        # 비전문가용 요약
-        with st.expander("📖 이 탭이 보여주는 것 (쉬운 설명)", expanded=True):
+        with st.expander(t('model_explain_title', lang), expanded=True):
             auc_val = perf['model_perf']['auc'].max() if 'model_perf' in perf else 0
-            st.markdown(f"""
+            if lang == 'en':
+                st.markdown(f"""
+**How accurate is the model?**
+- **AUC {auc_val:.4f}** — Closer to 1.0 = perfect. 0.5 = random guessing.
+  Current value means the model is **highly accurate** at identifying at-risk facilities.
+- **Recall@Top5%** — "If we only inspect the top 5%, what % of actual fire-risk facilities do we catch?"
+- **Ablation Study** — Which factor (weather/spatial/facility/history) contributes most?
+- **Region CV** — Does the model generalize to areas it wasn't trained on?
+                """)
+            else:
+                st.markdown(f"""
 **모델이 얼마나 정확한가?**
 - **AUC {auc_val:.4f}** — 1.0에 가까울수록 완벽. 0.5는 무작위 추측과 같음.
   현재 값은 **전체 설비 중 실제 위험 설비를 찾아내는 정확도가 매우 높음**을 의미합니다.
 - **Recall@Top5%** — "상위 5%만 점검하면 실제 화재 위험 설비 중 몇 %를 잡을 수 있는가?"
 - **Ablation Study** — 기상/공간/설비/이력 중 어떤 요소가 가장 중요한지 확인
 - **Region CV** — 특정 지역 데이터로만 학습해도 다른 지역에서 잘 동작하는지 검증
-            """)
+                """)
 
         col1, col2 = st.columns(2)
         with col1:
             if 'recall_k' in perf:
                 rk = perf['recall_k']
                 fig, ax = plt.subplots(figsize=(6, 4))
-                ax.plot(rk['k_pct']*100, rk['recall']*100, 'o-',
-                        color='#d62728', lw=2, label='Recall@K')
-                ax.plot(rk['k_pct']*100, rk['precision']*100, 's--',
-                        color='#1f77b4', lw=2, label='Precision@K')
-                ax.axhline(80, color='gray', ls=':', lw=1, alpha=0.5, label='80% 기준선')
-                ax.set_xlabel('상위 K (%)'); ax.set_ylabel('성능 (%)')
-                ax.set_title('상위 K% 점검 시 실제 위험 설비 탐지율', fontweight='bold')
+                ax.plot(rk['k_pct']*100, rk['recall']*100, 'o-', color='#d62728', lw=2, label='Recall@K')
+                ax.plot(rk['k_pct']*100, rk['precision']*100, 's--', color='#1f77b4', lw=2, label='Precision@K')
+                threshold_lbl = '80% threshold' if lang == 'en' else '80% 기준선'
+                ax.axhline(80, color='gray', ls=':', lw=1, alpha=0.5, label=threshold_lbl)
+                if lang == 'en':
+                    ax.set_xlabel('Top K (%)'); ax.set_ylabel('Performance (%)')
+                    ax.set_title('Detection Rate of At-Risk Facilities by Top-K%', fontweight='bold')
+                else:
+                    ax.set_xlabel('상위 K (%)'); ax.set_ylabel('성능 (%)')
+                    ax.set_title('상위 K% 점검 시 실제 위험 설비 탐지율', fontweight='bold')
                 ax.legend(); ax.grid(alpha=0.3)
                 plt.tight_layout(); st.pyplot(fig); plt.close()
-                # 해석
                 best_recall = rk['recall'].max()
-                st.success(f"💡 상위 {int(rk.loc[rk['recall'].idxmax(),'k_pct']*100)}%만 점검해도 "
-                           f"실제 위험 설비의 **{best_recall:.1%}**를 포함합니다.")
+                best_k = int(rk.loc[rk['recall'].idxmax(), 'k_pct'] * 100)
+                if lang == 'en':
+                    st.success(f"💡 Inspecting only the top **{best_k}%** covers **{best_recall:.1%}** of all actual fire-risk facilities.")
+                else:
+                    st.success(f"💡 상위 {best_k}%만 점검해도 실제 위험 설비의 **{best_recall:.1%}**를 포함합니다.")
 
         with col2:
             if 'ablation' in perf:
                 abl = perf['ablation']
                 fig, ax = plt.subplots(figsize=(6, 4))
                 colors_abl = ['#aec7e8','#6baed6','#3182bd','#08519c']
-                bars = ax.bar(range(len(abl)), abl['top5_overlap_pct'],
-                              color=colors_abl, alpha=0.85)
-                ax.axhline(80, color='red', ls='--', lw=1.5, label='80% 기준')
+                bars = ax.bar(range(len(abl)), abl['top5_overlap_pct'], color=colors_abl, alpha=0.85)
+                threshold_lbl = '80% baseline' if lang == 'en' else '80% 기준'
+                ax.axhline(80, color='red', ls='--', lw=1.5, label=threshold_lbl)
                 ax.set_xticks(range(len(abl)))
-                ax.set_xticklabels([m.replace('_',' ') for m in abl['model']],
-                                   rotation=15, ha='right', fontsize=9)
-                ax.set_ylabel('Top5% 일치율 (%)')
-                ax.set_title('요소 추가에 따른 예측 안정성', fontweight='bold')
+                ax.set_xticklabels([m.replace('_',' ') for m in abl['model']], rotation=15, ha='right', fontsize=9)
+                if lang == 'en':
+                    ax.set_ylabel('Top-5% Overlap Rate (%)')
+                    ax.set_title('Prediction Stability by Feature Layer', fontweight='bold')
+                else:
+                    ax.set_ylabel('Top5% 일치율 (%)')
+                    ax.set_title('요소 추가에 따른 예측 안정성', fontweight='bold')
                 for b, v in zip(bars, abl['top5_overlap_pct']):
-                    ax.text(b.get_x()+b.get_width()/2, v+1, f'{v:.0f}%',
-                            ha='center', fontsize=9)
+                    ax.text(b.get_x()+b.get_width()/2, v+1, f'{v:.0f}%', ha='center', fontsize=9)
                 ax.legend(); ax.set_ylim(0, 115)
                 plt.tight_layout(); st.pyplot(fig); plt.close()
-                st.info("💡 기상 정보만 사용할 때보다 공간·설비·이력 정보를 추가할수록\n"
-                        "Top-5% 위험 설비 식별 정확도가 크게 향상됩니다.")
+                if lang == 'en':
+                    st.info("💡 Adding spatial, facility, and history features significantly improves Top-5% identification accuracy over weather-only.")
+                else:
+                    st.info("💡 기상 정보만 사용할 때보다 공간·설비·이력 정보를 추가할수록\nTop-5% 위험 설비 식별 정확도가 크게 향상됩니다.")
 
         if 'shap_imp' in perf:
-            st.markdown("**🔬 어떤 요소가 화재 위험을 가장 많이 결정하는가?**")
+            if lang == 'en':
+                st.markdown("**🔬 Which factors determine fire risk the most?**")
+            else:
+                st.markdown("**🔬 어떤 요소가 화재 위험을 가장 많이 결정하는가?**")
             si = perf['shap_imp'].head(15)
             fig, ax = plt.subplots(figsize=(10, 5))
-            ax.barh(si['feature'][::-1], si['mean_abs_shap'][::-1],
-                    color='steelblue', alpha=0.8)
-            ax.set_xlabel('SHAP 중요도 (값이 클수록 중요)')
-            ax.set_title('화재 위험 결정 요인 순위 (Top 15)', fontweight='bold')
+            ax.barh(si['feature'][::-1], si['mean_abs_shap'][::-1], color='steelblue', alpha=0.8)
+            if lang == 'en':
+                ax.set_xlabel('SHAP Importance (higher = more influential)')
+                ax.set_title('Top 15 Fire Risk Determinants (SHAP)', fontweight='bold')
+            else:
+                ax.set_xlabel('SHAP 중요도 (값이 클수록 중요)')
+                ax.set_title('화재 위험 결정 요인 순위 (Top 15)', fontweight='bold')
             plt.tight_layout(); st.pyplot(fig); plt.close()
             top_feat = si.iloc[0]['feature']
-            st.success(f"💡 가장 중요한 요인: **{top_feat}** — "
-                       f"이 변수가 개별 설비의 화재 위험도를 결정하는 데 가장 큰 영향을 미칩니다.")
+            if lang == 'en':
+                st.success(f"💡 Most influential factor: **{top_feat}** — this variable has the greatest impact on individual facility fire risk.")
+            else:
+                st.success(f"💡 가장 중요한 요인: **{top_feat}** — 이 변수가 개별 설비의 화재 위험도를 결정하는 데 가장 큰 영향을 미칩니다.")
 
         if 'region_cv' in perf:
-            st.markdown("**🗺️ 지역별 검증 — 다른 지역에서도 잘 동작하는가?**")
+            if lang == 'en':
+                st.markdown("**🗺️ Regional Validation — Does it generalize to unseen areas?**")
+            else:
+                st.markdown("**🗺️ 지역별 검증 — 다른 지역에서도 잘 동작하는가?**")
             cv = perf['region_cv']
             avg_auc = cv['auc'].mean()
+            if lang == 'en':
+                rename_cv = {'test_station': 'Test Station', 'auc': 'AUC', 'n_test': 'Test Samples'}
+            else:
+                rename_cv = {'test_station': '테스트 권역', 'auc': 'AUC', 'n_test': '테스트 샘플'}
             st.dataframe(
-                cv[['test_station','auc','n_test']].rename(
-                    columns={'test_station':'테스트 권역','auc':'AUC','n_test':'테스트 샘플'}
-                ).assign(AUC=lambda d: d['AUC'].map('{:.4f}'.format)),
+                cv[['test_station','auc','n_test']].rename(columns=rename_cv)
+                .assign(AUC=lambda d: d['AUC'].map('{:.4f}'.format)),
                 use_container_width=True, hide_index=True
             )
-            st.success(f"✅ 평균 Region CV AUC: **{avg_auc:.4f}** "
-                       f"— 특정 지역 편향 없이 강원도 전역에서 안정적으로 작동합니다.")
+            if lang == 'en':
+                st.success(f"✅ Average Region CV AUC: **{avg_auc:.4f}** — Model performs stably across all Gangwon Province regions.")
+            else:
+                st.success(f"✅ 평균 Region CV AUC: **{avg_auc:.4f}** — 특정 지역 편향 없이 강원도 전역에서 안정적으로 작동합니다.")
 
     # ── TAB 5: 공간 분포 ─────────────────────────────────────────────────────
     with tab5:
-        st.markdown("##### 📈 위험도 공간 분포")
+        st.markdown(t('spatial_title', lang))
 
-        with st.expander("📖 이 탭이 보여주는 것 (쉬운 설명)", expanded=True):
+        with st.expander(t('model_explain_title', lang), expanded=True):
             top_stn = df.groupby('nearest_station')['final_risk'].mean().idxmax()
             top_val = df.groupby('nearest_station')['final_risk'].mean().max()
-            st.markdown(f"""
+            if lang == 'en':
+                st.markdown(f"""
+**Which area in Gangwon has the most at-risk power poles?**
+- Compares average risk scores across station areas.
+- Currently, **{top_stn}** station area has the highest avg. risk ({top_val:.1f}/100).
+- This reflects combined effects of forest proximity, terrain slope, and weather conditions.
+                """)
+            else:
+                st.markdown(f"""
 **강원도 어느 지역의 전봇대가 가장 위험한가?**
 - 관측소별 평균 위험도로 권역 간 위험도를 비교합니다.
 - 현재 **{top_stn}** 권역의 평균 위험도({top_val:.1f}점)가 가장 높습니다.
 - 이는 해당 권역의 산림 인접도, 경사도, 기상 조건이 복합적으로 작용한 결과입니다.
-            """)
+                """)
 
         col1, col2 = st.columns(2)
         with col1:
@@ -959,47 +1119,76 @@ def main():
             for b, v in zip(bars, stn_risk['mean']):
                 ax.text(v + 0.1, b.get_y() + b.get_height()/2,
                         f'{v:.1f}', va='center', fontsize=9)
-            ax.set_xlabel('평균 WPFI 위험도')
-            ax.set_title('관측소 권역별 평균 위험도', fontweight='bold')
-            ax.axvline(df['final_risk'].mean(), color='navy', ls='--', lw=1.5,
-                       label=f"전체 평균 {df['final_risk'].mean():.1f}")
+            if lang == 'en':
+                ax.set_xlabel('Avg. WPFI Risk Score')
+                ax.set_title('Average Risk Score by Station Area', fontweight='bold')
+                ax.axvline(df['final_risk'].mean(), color='navy', ls='--', lw=1.5,
+                           label=f"Overall avg {df['final_risk'].mean():.1f}")
+            else:
+                ax.set_xlabel('평균 WPFI 위험도')
+                ax.set_title('관측소 권역별 평균 위험도', fontweight='bold')
+                ax.axvline(df['final_risk'].mean(), color='navy', ls='--', lw=1.5,
+                           label=f"전체 평균 {df['final_risk'].mean():.1f}")
             ax.legend(fontsize=9)
             plt.tight_layout(); st.pyplot(fig); plt.close()
 
         with col2:
             grade_cnt = df['risk_grade'].value_counts()
+            GRADE_LABEL_L = GRADE_KR if lang == 'ko' else GRADE_EN
             fig, ax = plt.subplots(figsize=(5, 5))
             colors_pie = [GRADE_COLORS.get(g, '#888') for g in grade_cnt.index]
+            unit_p = "개" if lang == 'ko' else ""
             ax.pie(grade_cnt.values,
-                   labels=[f"{GRADE_KR.get(g,g)}\n{v:,}개" for g, v in grade_cnt.items()],
+                   labels=[f"{GRADE_LABEL_L.get(g,g)}\n{v:,}{unit_p}" for g, v in grade_cnt.items()],
                    colors=colors_pie, autopct='%1.1f%%', startangle=90)
-            ax.set_title('전체 위험등급 분포', fontweight='bold')
+            ax.set_title('Risk Grade Distribution' if lang == 'en' else '전체 위험등급 분포', fontweight='bold')
             plt.tight_layout(); st.pyplot(fig); plt.close()
             vh_pct = grade_cnt.get('Very High', 0) / grade_cnt.sum() * 100
-            st.info(f"💡 전체 설비의 **{vh_pct:.1f}%({grade_cnt.get('Very High',0):,}개)**가 즉각 점검 대상입니다.")
+            vh_cnt_p = grade_cnt.get('Very High', 0)
+            if lang == 'en':
+                st.info(f"💡 **{vh_pct:.1f}% ({vh_cnt_p:,} facilities)** require immediate inspection.")
+            else:
+                st.info(f"💡 전체 설비의 **{vh_pct:.1f}%({vh_cnt_p:,}개)**가 즉각 점검 대상입니다.")
 
         img_path = OUT_FIGURES / 'fig4_risk_map.png'
         if img_path.exists():
-            st.markdown("**강원도 전봇대 화재위험도 공간 분포**")
-            st.image(str(img_path), use_container_width=True,
-                     caption="붉은색 = 상위 5% 고위험 설비 (강원도 전역)")
+            if lang == 'en':
+                st.markdown("**Gangwon Province Power Pole Fire Risk Spatial Distribution**")
+                st.image(str(img_path), use_container_width=True,
+                         caption="Red = Top 5% high-risk facilities (Gangwon Province)")
+            else:
+                st.markdown("**강원도 전봇대 화재위험도 공간 분포**")
+                st.image(str(img_path), use_container_width=True,
+                         caption="붉은색 = 상위 5% 고위험 설비 (강원도 전역)")
 
     # ── TAB 6: 트렌드 분석 ───────────────────────────────────────────────────
     with tab6:
-        st.markdown("##### 📅 기상위험도 시계열 트렌드 분석 (2022~2024)")
+        st.markdown(t('trend_title', lang))
 
-        with st.expander("📖 이 탭이 보여주는 것 (쉬운 설명)", expanded=True):
-            st.markdown("""
+        with st.expander(t('model_explain_title', lang), expanded=True):
+            if lang == 'en':
+                st.markdown("""
+**How does fire risk change over time?**
+- Shows monthly and seasonal weather hazard trends.
+- **Spring (Mar–May) and Autumn (Sep–Nov)** are the highest-risk periods due to dry and windy conditions.
+- The heatmap shows **which station area is most dangerous in which month**.
+                """)
+            else:
+                st.markdown("""
 **시간에 따라 화재 위험이 어떻게 변화하는가?**
 - 월별·계절별 기상위험도 변화를 보여줍니다.
 - **봄(3~5월)과 가을(9~11월)** 이 건조하고 바람이 강해 화재 위험이 가장 높습니다.
 - 히트맵으로 **어느 권역이, 어느 달에** 특히 위험한지 한눈에 파악할 수 있습니다.
-            """)
+                """)
 
         if trend is None:
-            st.warning("데이터 없음. notebooks/06_modeling.ipynb를 먼저 실행하세요.")
+            st.warning("Data not found. Run notebooks/06_modeling.ipynb first." if lang == 'en'
+                       else "데이터 없음. notebooks/06_modeling.ipynb를 먼저 실행하세요.")
         else:
-            MONTH_KR = {m: f'{m}월' for m in range(1, 13)}
+            MONTH_LABELS = ({m: f'M{m}' for m in range(1,13)} if lang == 'en'
+                            else {m: f'{m}월' for m in range(1,13)})
+            SEASON_LABELS = (['Spring','Summer','Autumn','Winter'] if lang == 'en'
+                             else ['봄','여름','가을','겨울'])
             SEASON_COLOR = {0:'#5b9bd5', 1:'#70ad47', 2:'#ffc000', 3:'#ed7d31'}
 
             daily = (trend.groupby('date')
@@ -1020,17 +1209,22 @@ def main():
             col1, col2 = st.columns(2)
             with col1:
                 fig, ax = plt.subplots(figsize=(8, 4))
+                lbl_mean = 'Avg Weather Hazard' if lang == 'en' else '평균 기상위험도'
+                lbl_rng  = 'Avg~Max range'       if lang == 'en' else '평균~최대 범위'
                 ax.plot(range(len(monthly)), monthly['hazard_mean'],
-                        'o-', color='#d62728', lw=2, ms=4, label='평균 기상위험도')
+                        'o-', color='#d62728', lw=2, ms=4, label=lbl_mean)
                 ax.fill_between(range(len(monthly)),
                                 monthly['hazard_mean'], monthly['hazard_max'],
-                                alpha=0.15, color='#d62728', label='평균~최대 범위')
+                                alpha=0.15, color='#d62728', label=lbl_rng)
                 tick_step = max(1, len(monthly) // 12)
                 ax.set_xticks(range(0, len(monthly), tick_step))
-                ax.set_xticklabels(monthly['ym'].iloc[::tick_step],
-                                   rotation=45, ha='right', fontsize=8)
-                ax.set_ylabel('기상위험도 (0~100)')
-                ax.set_title('월별 평균 기상위험도 추이', fontweight='bold')
+                ax.set_xticklabels(monthly['ym'].iloc[::tick_step], rotation=45, ha='right', fontsize=8)
+                if lang == 'en':
+                    ax.set_ylabel('Weather Hazard (0–100)')
+                    ax.set_title('Monthly Average Weather Hazard Trend', fontweight='bold')
+                else:
+                    ax.set_ylabel('기상위험도 (0~100)')
+                    ax.set_title('월별 평균 기상위험도 추이', fontweight='bold')
                 ax.legend(fontsize=9); ax.grid(alpha=0.3)
                 plt.tight_layout(); st.pyplot(fig); plt.close()
 
@@ -1038,23 +1232,29 @@ def main():
                 season_groups = [daily[daily['season'] == s]['weather_hazard_mean'].values
                                  for s in [1, 2, 3, 0]]
                 fig, ax = plt.subplots(figsize=(6, 4))
-                bp = ax.boxplot(season_groups, patch_artist=True, labels=['봄','여름','가을','겨울'])
+                bp = ax.boxplot(season_groups, patch_artist=True, labels=SEASON_LABELS)
                 for patch, color in zip(bp['boxes'], [SEASON_COLOR[s] for s in [1,2,3,0]]):
                     patch.set_facecolor(color); patch.set_alpha(0.7)
-                ax.set_ylabel('일평균 기상위험도')
-                ax.set_title('계절별 기상위험도 분포', fontweight='bold')
+                if lang == 'en':
+                    ax.set_ylabel('Daily Avg Weather Hazard')
+                    ax.set_title('Seasonal Weather Hazard Distribution', fontweight='bold')
+                else:
+                    ax.set_ylabel('일평균 기상위험도')
+                    ax.set_title('계절별 기상위험도 분포', fontweight='bold')
                 ax.grid(alpha=0.3, axis='y')
                 plt.tight_layout(); st.pyplot(fig); plt.close()
-                peak_season = ['봄','여름','가을','겨울'][[
-                    daily[daily['season']==s]['weather_hazard_mean'].mean()
-                    for s in [1,2,3,0]].index(max(
-                    [daily[daily['season']==s]['weather_hazard_mean'].mean()
-                     for s in [1,2,3,0]]))]
-                st.info(f"💡 **{peak_season}** 기상위험도가 가장 높습니다. "
-                        f"이 계절에 점검 자원을 집중 배치하는 것을 권고합니다.")
+                season_avgs = [daily[daily['season']==s]['weather_hazard_mean'].mean() for s in [1,2,3,0]]
+                peak_idx = season_avgs.index(max(season_avgs))
+                peak_season = SEASON_LABELS[peak_idx]
+                if lang == 'en':
+                    st.info(f"💡 **{peak_season}** has the highest weather hazard. Concentrate inspection resources in this season.")
+                else:
+                    st.info(f"💡 **{peak_season}** 기상위험도가 가장 높습니다. 이 계절에 점검 자원을 집중 배치하는 것을 권고합니다.")
 
             # 월별 화재 발생
-            st.markdown("**🔥 월별 화재 발생 건수 vs 기상위험도**")
+            fire_title = '**🔥 Monthly Fire Incidents vs Weather Hazard**' if lang == 'en' \
+                         else '**🔥 월별 화재 발생 건수 vs 기상위험도**'
+            st.markdown(fire_title)
             monthly_fire = (trend.groupby(['year','month'])
                             .agg(fire_count=('label','sum'),
                                  hazard_mean=('weather_hazard','mean'))
@@ -1063,16 +1263,21 @@ def main():
             ax2 = ax1.twinx()
             w = 0.25; offsets = {2022: -w, 2023: 0, 2024: w}
             colors_yr = {2022:'#5b9bd5', 2023:'#ed7d31', 2024:'#70ad47'}
+            yr_lbl_sfx = '' if lang == 'en' else '년'
             for yr, grp in monthly_fire.groupby('year'):
                 ax1.bar(grp['month'] + offsets[yr], grp['fire_count'],
-                        width=w, color=colors_yr[yr], alpha=0.8, label=f'{yr}년')
+                        width=w, color=colors_yr[yr], alpha=0.8, label=f'{yr}{yr_lbl_sfx}')
             mf_avg = monthly_fire.groupby('month')['hazard_mean'].mean()
-            ax2.plot(mf_avg.index, mf_avg.values, 'k--o', lw=1.5, ms=5, alpha=0.7,
-                     label='월평균 기상위험도')
+            mf_lbl = 'Monthly Avg Hazard' if lang == 'en' else '월평균 기상위험도'
+            ax2.plot(mf_avg.index, mf_avg.values, 'k--o', lw=1.5, ms=5, alpha=0.7, label=mf_lbl)
             ax1.set_xticks(range(1, 13))
-            ax1.set_xticklabels([MONTH_KR[m] for m in range(1, 13)])
-            ax1.set_ylabel('화재 발생 건수'); ax2.set_ylabel('기상위험도')
-            ax1.set_title('월별 화재 발생 건수 vs 기상위험도', fontweight='bold')
+            ax1.set_xticklabels([MONTH_LABELS[m] for m in range(1, 13)])
+            if lang == 'en':
+                ax1.set_ylabel('Fire Incidents'); ax2.set_ylabel('Weather Hazard')
+                ax1.set_title('Monthly Fire Incidents vs Weather Hazard', fontweight='bold')
+            else:
+                ax1.set_ylabel('화재 발생 건수'); ax2.set_ylabel('기상위험도')
+                ax1.set_title('월별 화재 발생 건수 vs 기상위험도', fontweight='bold')
             lines1, labels1 = ax1.get_legend_handles_labels()
             lines2, labels2 = ax2.get_legend_handles_labels()
             ax1.legend(lines1 + lines2, labels1 + labels2, fontsize=9, loc='upper left')
@@ -1081,10 +1286,12 @@ def main():
 
             # 히트맵
             if 'nearest_station' in trend.columns:
-                st.markdown("**🌡️ 관측소별 × 월별 기상위험도 히트맵**")
+                heatmap_title = '**🌡️ Station × Month Weather Hazard Heatmap**' if lang == 'en' \
+                                else '**🌡️ 관측소별 × 월별 기상위험도 히트맵**'
+                st.markdown(heatmap_title)
                 stn_monthly = (trend.groupby(['nearest_station','month'])
                                ['weather_hazard'].mean().unstack())
-                stn_monthly.columns = [MONTH_KR[c] for c in stn_monthly.columns]
+                stn_monthly.columns = [MONTH_LABELS[c] for c in stn_monthly.columns]
                 fig, ax = plt.subplots(figsize=(12, 5))
                 im = ax.imshow(stn_monthly.values, aspect='auto',
                                cmap='YlOrRd', vmin=0, vmax=100)
@@ -1092,14 +1299,16 @@ def main():
                 ax.set_xticklabels(stn_monthly.columns)
                 ax.set_yticks(range(len(stn_monthly.index)))
                 ax.set_yticklabels(stn_monthly.index)
-                plt.colorbar(im, ax=ax, label='평균 기상위험도')
+                cbar_lbl = 'Avg Weather Hazard' if lang == 'en' else '평균 기상위험도'
+                plt.colorbar(im, ax=ax, label=cbar_lbl)
                 for i in range(stn_monthly.shape[0]):
                     for j in range(stn_monthly.shape[1]):
                         v = stn_monthly.values[i, j]
                         if not np.isnan(v):
                             ax.text(j, i, f'{v:.0f}', ha='center', va='center',
                                     fontsize=7, color='white' if v > 65 else 'black')
-                ax.set_title('관측소별 × 월별 평균 기상위험도', fontweight='bold')
+                hm_t = 'Station × Month Avg Weather Hazard' if lang == 'en' else '관측소별 × 월별 평균 기상위험도'
+                ax.set_title(hm_t, fontweight='bold')
                 plt.tight_layout(); st.pyplot(fig); plt.close()
 
     # ── TAB 7: 기상 예보 ─────────────────────────────────────────────────────
@@ -1158,20 +1367,25 @@ def main():
                 for d in dates:
                     dt   = pd.to_datetime(d, format="%Y%m%d")
                     diff = (dt - today.normalize()).days
-                    lbl  = {0:"오늘",1:"내일",2:"모레"}.get(diff, dt.strftime("%m/%d"))
-                    date_labels.append(f"{lbl} ({dt.strftime('%m.%d')})")
+                    day_lbl_map = ({0:"Today",1:"Tomorrow",2:"Day+2"} if lang=='en'
+                                   else {0:"오늘",1:"내일",2:"모레"})
+                    lbl = day_lbl_map.get(diff, dt.strftime("%m/%d"))
+                    date_labels.append(f"{lbl} ({dt.strftime('%m/%d' if lang=='en' else '%m.%d')})")
 
                 # ── 3일 전체 종합 권고 ──────────────────────────────────────
-                st.markdown("#### 🧭 향후 3일 종합 권고")
-                overall_key = "fc_overall_recommend"
+                st.markdown(t('fc_overall', lang))
+                overall_key = f"fc_overall_recommend_{lang}"
                 if overall_key not in st.session_state:
-                    with st.spinner("3일 종합 분석 중..."):
+                    spin_msg = "Analyzing 3-day forecast..." if lang == 'en' else "3일 종합 분석 중..."
+                    with st.spinner(spin_msg):
                         st.session_state[overall_key] = get_overall_forecast_recommendation(
-                            fc_result, fc_feat)
+                            fc_result, fc_feat, lang)
                 st.warning(f"🤖 {st.session_state[overall_key]}")
 
                 # ── 3일 KPI 요약 카드 ──────────────────────────────────────
-                st.markdown("#### 📅 날짜별 위험 현황")
+                st.markdown(t('fc_daily', lang))
+                unit_fc = "" if lang == 'en' else "개"
+                wh_lbl_fc = "Hazard" if lang == 'en' else "기상위험"
                 day_cols = st.columns(len(dates))
                 for i, (d, lbl, col) in enumerate(zip(dates, date_labels, day_cols)):
                     day_data = fc_result[fc_result['fcst_date'] == d]
@@ -1184,14 +1398,14 @@ def main():
                         st.markdown(f"""
 <div style='padding:12px;border-radius:10px;background:{bg};text-align:center;border:1px solid #ddd'>
 <b>{lbl}</b><br>
-🔴 {vh_d:,}개<br>
-🟠 {hi_d:,}개<br>
-기상위험 <b>{wh_max:.1f}</b>
+🔴 {vh_d:,}{unit_fc}<br>
+🟠 {hi_d:,}{unit_fc}<br>
+{wh_lbl_fc} <b>{wh_max:.1f}</b>
 </div>""", unsafe_allow_html=True)
 
                 st.markdown("---")
-                st.markdown("#### 🔍 날짜별 상세 분석")
-                sel_idx  = st.radio("📅 날짜 선택", range(len(dates)),
+                st.markdown(t('fc_detail', lang))
+                sel_idx  = st.radio(t('fc_date', lang), range(len(dates)),
                                     format_func=lambda i: date_labels[i], horizontal=True)
                 sel_date = dates[sel_idx]
                 fc_day   = fc_result[fc_result['fcst_date'] == sel_date]
@@ -1200,30 +1414,42 @@ def main():
                 # KPI
                 cols = st.columns(4)
                 for col, grade in zip(cols, ['Very High','High','Moderate','Low']):
-                    col.metric(GRADE_KR_F[grade],
-                               f"{(fc_day['forecast_grade']==grade).sum():,}개")
+                    g_lbl = GRADE_KR[grade] if lang == 'ko' else grade
+                    col.metric(g_lbl, f"{(fc_day['forecast_grade']==grade).sum():,}{unit_fc}")
 
                 # AI 예방 권고 — 항상 표시
-                st.markdown("**🤖 AI 위험 분석 및 예방 권고**")
-                rec_key = f"fc_recommend_{sel_date}"
+                st.markdown(t('fc_ai_rec', lang))
+                rec_key = f"fc_recommend_{sel_date}_{lang}"
                 if rec_key not in st.session_state:
-                    with st.spinner("OpenAI 분석 중..."):
+                    spin_rec = "Analyzing with OpenAI..." if lang == 'en' else "OpenAI 분석 중..."
+                    with st.spinner(spin_rec):
                         st.session_state[rec_key] = get_forecast_recommendation(
-                            feat_day, fc_day, date_labels[sel_idx])
+                            feat_day, fc_day, date_labels[sel_idx], lang)
                 st.warning(st.session_state[rec_key])
 
                 # 관측소별 기상 요약
-                st.markdown("**🌡️ 관측소별 기상 예보**")
+                st.markdown(t('fc_wx_sum', lang))
                 if not feat_day.empty:
+                    if lang == 'en':
+                        wx_rename = {
+                            'station':'Station','temp_max':'Max Temp(℃)','rh_min':'Min Humid(%)',
+                            'ws_max':'Max Wind(m/s)','precip_sum':'Precip(mm)',
+                            'weather_hazard':'Hazard','dry_watch_flag':'Dry Alert',
+                            'wind_watch_flag':'Wind Alert','combined_risk_flag':'Combined'
+                        }
+                        hazard_col = 'Hazard'
+                    else:
+                        wx_rename = {
+                            'station':'관측소','temp_max':'최고기온(℃)','rh_min':'최저습도(%)',
+                            'ws_max':'최대풍속(m/s)','precip_sum':'강수량(mm)',
+                            'weather_hazard':'기상위험도','dry_watch_flag':'건조주의보',
+                            'wind_watch_flag':'강풍주의보','combined_risk_flag':'복합위험'
+                        }
+                        hazard_col = '기상위험도'
                     feat_disp = feat_day[[
                         'station','temp_max','rh_min','ws_max','precip_sum',
                         'weather_hazard','dry_watch_flag','wind_watch_flag','combined_risk_flag'
-                    ]].rename(columns={
-                        'station':'관측소','temp_max':'최고기온(℃)','rh_min':'최저습도(%)',
-                        'ws_max':'최대풍속(m/s)','precip_sum':'강수량(mm)',
-                        'weather_hazard':'기상위험도','dry_watch_flag':'건조주의보',
-                        'wind_watch_flag':'강풍주의보','combined_risk_flag':'복합위험'
-                    }).sort_values('기상위험도', ascending=False).round(1)
+                    ]].rename(columns=wx_rename).sort_values(hazard_col, ascending=False).round(1)
 
                     def color_hazard(val):
                         if isinstance(val, (int, float)):
@@ -1231,66 +1457,78 @@ def main():
                             if val >= 50: return 'background-color:#fff0e0'
                         return ''
                     st.dataframe(
-                        feat_disp.style.map(color_hazard, subset=['기상위험도']),
+                        feat_disp.style.map(color_hazard, subset=[hazard_col]),
                         use_container_width=True, hide_index=True
                     )
 
                 # 예보 위험도 지도
-                st.markdown(f"**🗺️ 예보 위험도 지도 — {date_labels[sel_idx]}**")
+                st.markdown(f"{t('fc_map', lang)} {date_labels[sel_idx]}**")
                 if gdf is not None:
                     gdf_fc = gdf.merge(
                         fc_day[['pole_id','forecast_risk','forecast_grade','weather_hazard']],
                         on='pole_id', how='inner')
                     gdf_fc['lat'] = gdf_fc.geometry.y
                     gdf_fc['lon'] = gdf_fc.geometry.x
-                    m_fc = folium.Map(location=[37.5, 128.3], zoom_start=9,
-                                      tiles='CartoDB positron')
+                    m_fc = folium.Map(location=[37.5, 128.3], zoom_start=9, tiles='CartoDB positron')
+                    fc_unit = "" if lang == 'en' else "개"
                     for grade in ['Very High','High','Moderate','Low']:
+                        g_lbl = GRADE_KR[grade] if lang == 'ko' else grade
                         color  = GRADE_COLORS_F[grade]
                         radius = {'Very High':8,'High':6,'Moderate':4,'Low':3}[grade]
                         sub = gdf_fc[gdf_fc['forecast_grade'] == grade]
                         total_g = len(sub)
                         if len(sub) > 2000:
                             sub = sub.nlargest(2000, 'forecast_risk')
-                        layer = folium.FeatureGroup(
-                            name=f"{GRADE_KR_F[grade]} ({total_g:,}개)")
+                        layer = folium.FeatureGroup(name=f"{g_lbl} ({total_g:,}{fc_unit})")
+                        fc_lbl = 'Facility' if lang == 'en' else '설비'
+                        fc_risk_lbl = 'Forecast Risk' if lang == 'en' else '예측 위험도'
+                        fc_grade_lbl = 'Grade' if lang == 'en' else '등급'
+                        fc_wh_lbl = 'Weather' if lang == 'en' else '기상위험'
                         for _, row in sub.iterrows():
                             folium.CircleMarker(
                                 location=[row['lat'], row['lon']],
                                 radius=radius, color=color, fill=True,
                                 fill_color=color, fill_opacity=0.75,
-                                tooltip=f"#{int(row['pole_id'])}: {row['forecast_risk']:.1f}점",
+                                tooltip=f"#{int(row['pole_id'])}: {row['forecast_risk']:.1f}",
                                 popup=folium.Popup(
-                                    f"<b>설비 #{int(row['pole_id'])}</b><br>"
-                                    f"예측 위험도: {row['forecast_risk']:.1f}<br>"
-                                    f"등급: {GRADE_KR_F.get(row['forecast_grade'],'')}<br>"
-                                    f"기상위험: {row['weather_hazard']:.1f}",
+                                    f"<b>{fc_lbl} #{int(row['pole_id'])}</b><br>"
+                                    f"{fc_risk_lbl}: {row['forecast_risk']:.1f}<br>"
+                                    f"{fc_grade_lbl}: {g_lbl}<br>"
+                                    f"{fc_wh_lbl}: {row['weather_hazard']:.1f}",
                                     max_width=200)
                             ).add_to(layer)
                         layer.add_to(m_fc)
                     folium.LayerControl().add_to(m_fc)
                     st_folium(m_fc, width=None, height=500, returned_objects=[])
 
-                # Top-20 위험 설비
-                st.markdown("**🎯 예측 고위험 설비 Top-20**")
+                # Top-20
+                st.markdown(t('fc_top20', lang))
                 top20 = fc_day.nlargest(20, 'forecast_risk')[
                     ['pole_id','forecast_risk','forecast_grade','weather_hazard','nearest_station']
                 ].copy().reset_index(drop=True)
                 top20.index += 1
-                top20.columns = ['설비ID','예측 위험도','예측 등급','기상위험도','관측소']
-                top20['예측 위험도'] = top20['예측 위험도'].round(1)
-                top20['예측 등급']  = top20['예측 등급'].map(GRADE_KR_F)
+                if lang == 'en':
+                    top20.columns = ['Facility ID','Forecast Risk','Forecast Grade','Hazard','Station']
+                    top20['Forecast Risk']  = top20['Forecast Risk'].round(1)
+                    top20['Forecast Grade'] = top20['Forecast Grade'].map(GRADE_EN)
+                else:
+                    top20.columns = ['설비ID','예측 위험도','예측 등급','기상위험도','관측소']
+                    top20['예측 위험도'] = top20['예측 위험도'].round(1)
+                    top20['예측 등급']  = top20['예측 등급'].map(GRADE_KR)
                 st.dataframe(top20, use_container_width=True)
 
                 csv = fc_day[['pole_id','fcst_date','forecast_risk','forecast_grade',
                                'weather_hazard','nearest_station']].to_csv(
                     index=False, encoding='utf-8-sig')
-                st.download_button(
-                    f"📥 {date_labels[sel_idx]} 예보 CSV",
-                    csv, file_name=f"wpfi_forecast_{sel_date}.csv", mime="text/csv")
+                dl_lbl = f"📥 {date_labels[sel_idx]} Forecast CSV" if lang == 'en' \
+                         else f"📥 {date_labels[sel_idx]} 예보 CSV"
+                st.download_button(dl_lbl, csv,
+                                   file_name=f"wpfi_forecast_{sel_date}.csv", mime="text/csv")
 
             elif fc_result is not None:
-                st.error("예보 결과가 비어 있습니다. API 키 또는 네트워크를 확인하세요.")
+                err_msg = "Forecast result is empty. Check API key or network." if lang == 'en' \
+                          else "예보 결과가 비어 있습니다. API 키 또는 네트워크를 확인하세요."
+                st.error(err_msg)
 
     # ── 푸터 ─────────────────────────────────────────────────────────────────
     st.markdown(f"""
