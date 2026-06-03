@@ -127,13 +127,70 @@ def t(key: str, lang: str = 'ko') -> str:
 
 WEIGHTS = {'weather': 0.35, 'spatial': 0.30, 'facility': 0.25, 'prior': 0.10}
 
-SIMULATION_PRESETS = {
-    "현재 데이터 (기준)":       {"wh_mult": 1.00, "desc": "실제 분석 결과 그대로 표시"},
-    "봄철 건조강풍 시나리오":   {"wh_mult": 1.35, "desc": "실효습도 -20%, 풍속 +5m/s 조건 (산불 위험 최고조 시기)"},
-    "여름 폭염 시나리오":       {"wh_mult": 1.20, "desc": "기온 +8°C, 습도 -10% 조건"},
-    "가을 건조 시나리오":       {"wh_mult": 1.40, "desc": "연속 무강수 14일, 습도 -25% 조건"},
-    "겨울 강풍 시나리오":       {"wh_mult": 1.15, "desc": "풍속 +8m/s, 기온 -10°C 조건"},
-    "최악 복합 시나리오":       {"wh_mult": 1.70, "desc": "극건조 + 강풍 + 고온 동시 발생"},
+# 시뮬레이션 프리셋 (내부 키 → 언어별 레이블·설명)
+SIMULATION_PRESETS_DEF = [
+    {
+        "id":    "baseline",
+        "ko":    "현재 데이터 (기준)",
+        "en":    "Current Data (Baseline)",
+        "desc_ko": "실제 분석 결과 그대로 표시",
+        "desc_en": "Display actual analysis results as-is",
+        "wh_mult": 1.00,
+    },
+    {
+        "id":    "spring_dry_wind",
+        "ko":    "봄철 건조강풍 시나리오",
+        "en":    "Spring Dry & Windy",
+        "desc_ko": "실효습도 -20%, 풍속 +5m/s 조건 (산불 위험 최고조 시기)",
+        "desc_en": "Eff. humidity −20%, wind speed +5 m/s (peak wildfire season)",
+        "wh_mult": 1.35,
+    },
+    {
+        "id":    "summer_heatwave",
+        "ko":    "여름 폭염 시나리오",
+        "en":    "Summer Heatwave",
+        "desc_ko": "기온 +8°C, 습도 -10% 조건",
+        "desc_en": "Temperature +8°C, humidity −10%",
+        "wh_mult": 1.20,
+    },
+    {
+        "id":    "autumn_dry",
+        "ko":    "가을 건조 시나리오",
+        "en":    "Autumn Dry Season",
+        "desc_ko": "연속 무강수 14일, 습도 -25% 조건",
+        "desc_en": "14-day no-rain streak, humidity −25%",
+        "wh_mult": 1.40,
+    },
+    {
+        "id":    "winter_wind",
+        "ko":    "겨울 강풍 시나리오",
+        "en":    "Winter Strong Wind",
+        "desc_ko": "풍속 +8m/s, 기온 -10°C 조건",
+        "desc_en": "Wind speed +8 m/s, temperature −10°C",
+        "wh_mult": 1.15,
+    },
+    {
+        "id":    "worst_case",
+        "ko":    "최악 복합 시나리오",
+        "en":    "Worst-Case Composite",
+        "desc_ko": "극건조 + 강풍 + 고온 동시 발생",
+        "desc_en": "Extreme drought + strong wind + high temperature simultaneously",
+        "wh_mult": 1.70,
+    },
+]
+# 내부 ID → 프리셋 빠른 조회
+_SIM_BY_ID = {p["id"]: p for p in SIMULATION_PRESETS_DEF}
+
+# 레거시 호환: apply_simulation에서 wh_mult를 가져오기 위한 딕셔너리
+SIMULATION_PRESETS = {p["ko"]: {"wh_mult": p["wh_mult"], "desc": p["desc_ko"]}
+                      for p in SIMULATION_PRESETS_DEF}
+
+# 관측소명 한→영 매핑 (KMA 공식 영문명)
+STATION_EN = {
+    "춘천": "Chuncheon",  "홍천": "Hongcheon", "인제": "Inje",
+    "원주": "Wonju",      "횡성": "Hoengseong","강릉": "Gangneung",
+    "양양": "Yangyang",   "정선": "Jeongseon", "동해": "Donghae",
+    "삼척": "Samcheok",   "태백": "Taebaek",   "속초": "Sokcho",
 }
 
 # 실제 데이터에서 역산한 등급 임계값 (노트북 분위수 기반)
@@ -593,8 +650,14 @@ def shap_waterfall(pole_id, df, model, features):
         colors = ['#d62728' if v > 0 else '#2ca02c' for v in feat_vals]
         ax.barh(feat_names[::-1], feat_vals[::-1], color=colors[::-1], alpha=0.8)
         ax.axvline(0, color='black', linewidth=0.8)
-        ax.set_xlabel('SHAP 값 (+ : 위험 증가 / - : 위험 감소)')
-        ax.set_title(f'설비 #{pole_id} — SHAP 기여도 (ML 확률: {prob_col[best_idx]:.3f})',
+        _lp2 = st.session_state.get('lang', 'ko')
+        ax.set_xlabel('SHAP value (+ : risk increase / - : risk decrease)'
+                      if _lp2 == 'en' else 'SHAP 값 (+ : 위험 증가 / - : 위험 감소)')
+        _lp = st.session_state.get('lang', 'ko')
+        _shap_t = (f'Facility #{pole_id} — SHAP Contribution (ML prob: {prob_col[best_idx]:.3f})'
+                   if _lp == 'en' else
+                   f'설비 #{pole_id} — SHAP 기여도 (ML 확률: {prob_col[best_idx]:.3f})')
+        ax.set_title(_shap_t,
                      fontsize=11, fontweight='bold')
         plt.tight_layout()
         return fig
@@ -690,7 +753,9 @@ def main():
     model, scaler, features = load_model()
 
     if df is None:
-        st.error("📂 분석 데이터가 없습니다. notebooks/01~08을 먼저 실행하세요.")
+        st.error("📂 No analysis data found. Run notebooks/01–08 first."
+                 if lang == 'en' else
+                 "📂 분석 데이터가 없습니다. notebooks/01~08을 먼저 실행하세요.")
         return
 
     # geo 병합
@@ -717,9 +782,21 @@ def main():
 
         topk_pct = st.slider(t('topk_label', lang), 1, 20, 5)
         all_lbl = t('all_stations', lang)
-        stns = [all_lbl] + sorted(df['nearest_station'].dropna().unique().tolist())
-        sel_stn = st.selectbox(t('station_label', lang), stns)
-        sel_stn_val = None if sel_stn == all_lbl else sel_stn
+        raw_stns = sorted(df['nearest_station'].dropna().unique().tolist())
+        # 영어 모드: 영문명(원문) 형식으로 표시
+        if lang == 'en':
+            stn_display = [all_lbl] + [f"{STATION_EN.get(s, s)} ({s})" for s in raw_stns]
+        else:
+            stn_display = [all_lbl] + raw_stns
+        sel_stn_disp = st.selectbox(t('station_label', lang), stn_display)
+        # 실제 필터링에 사용하는 한국어 원본 값
+        if sel_stn_disp == all_lbl:
+            sel_stn_val = None
+        elif lang == 'en':
+            # "Chuncheon (춘천)" → "춘천" 추출
+            sel_stn_val = sel_stn_disp.split("(")[-1].rstrip(")")
+        else:
+            sel_stn_val = sel_stn_disp
         score_type = st.radio(t('score_basis', lang),
                               [t('wpfi_score', lang), t('ml_score', lang)], index=0)
         risk_col = 'final_risk' if score_type == t('wpfi_score', lang) else 'ml_score'
@@ -727,24 +804,51 @@ def main():
         # ── 기상 시뮬레이션 ─────────────────────────────────────────────────
         st.markdown("---")
         st.markdown(f"### {t('scenario_lbl', lang)}")
-        preset_name = st.selectbox(
-            t('scenario_sel', lang),
-            list(SIMULATION_PRESETS.keys()),
-        )
-        st.caption(f"📌 {SIMULATION_PRESETS[preset_name]['desc']}")
+        # 언어에 맞는 레이블 목록
+        sim_labels = [p['en'] if lang == 'en' else p['ko'] for p in SIMULATION_PRESETS_DEF]
+        sel_sim_label = st.selectbox(t('scenario_sel', lang), sim_labels)
+        # 내부 ID 역조회
+        label_key = 'en' if lang == 'en' else 'ko'
+        sel_preset = next((p for p in SIMULATION_PRESETS_DEF if p[label_key] == sel_sim_label),
+                          SIMULATION_PRESETS_DEF[0])
+        preset_desc = sel_preset['desc_en'] if lang == 'en' else sel_preset['desc_ko']
+        st.caption(f"📌 {preset_desc}")
 
         with st.expander(t('fine_tune', lang)):
             wh_add = st.slider(t('wh_adjust', lang), -20, +30, 0)
             sp_add = st.slider(t('sp_adjust', lang), -10, +20, 0)
 
-        is_sim = (preset_name != "현재 데이터 (기준)") or (wh_add != 0) or (sp_add != 0)
-        df_sim = apply_simulation(df, preset_name, wh_add, sp_add) if is_sim else df
+        is_sim = (sel_preset['id'] != 'baseline') or (wh_add != 0) or (sp_add != 0)
+        # apply_simulation은 내부적으로 wh_mult만 사용 → 직접 전달
+        if is_sim:
+            df_sim = df.copy()
+            df_sim['weather_hazard'] = (df_sim['weather_hazard'] * sel_preset['wh_mult'] + wh_add).clip(0, 100)
+            if sp_add != 0:
+                df_sim['spatial_exposure'] = (df_sim['spatial_exposure'] + sp_add).clip(0, 100)
+            df_sim['final_risk'] = (
+                df_sim['weather_hazard']    * WEIGHTS['weather'] +
+                df_sim['spatial_exposure']  * WEIGHTS['spatial'] +
+                df_sim['facility_exposure'] * WEIGHTS['facility'] +
+                df_sim['hist_prior']        * WEIGHTS['prior']
+            ).clip(0, 100)
+            VH_THR, HI_THR, MO_THR = GRADE_THRESHOLDS_ACTUAL["Very High"], GRADE_THRESHOLDS_ACTUAL["High"], GRADE_THRESHOLDS_ACTUAL["Moderate"]
+            def _sim_grade(s):
+                if s >= VH_THR: return 'Very High'
+                if s >= HI_THR: return 'High'
+                if s >= MO_THR: return 'Moderate'
+                return 'Low'
+            df_sim['risk_grade'] = df_sim['final_risk'].apply(_sim_grade)
+        else:
+            df_sim = df
 
         if is_sim:
             orig_vh = (df['risk_grade'] == 'Very High').sum()
             sim_vh  = (df_sim['risk_grade'] == 'Very High').sum()
             delta   = sim_vh - orig_vh
-            st.warning(f"{t('sim_active', lang)}\nVery High: {orig_vh:,} → {sim_vh:,} ({delta:+,})")
+            if lang == 'en':
+                st.warning(f"⚠️ Simulation Active: {sel_preset['en']}\nVery High: {orig_vh:,} → {sim_vh:,} ({delta:+,})")
+            else:
+                st.warning(f"⚠️ 시뮬레이션 적용 중: {sel_preset['ko']}\nVery High: {orig_vh:,} → {sim_vh:,} ({delta:+,})")
 
         st.markdown("---")
         st.markdown(f"### {t('stats_lbl', lang)}")
@@ -826,21 +930,23 @@ def main():
     with tab1:
         st.markdown(t('map_title', lang))
         if is_sim:
-            st.warning(f"⚠️ {'시뮬레이션 모드' if lang=='ko' else 'Simulation Mode'}: {preset_name}")
+            sim_mode_label = sel_preset['en'] if lang == 'en' else sel_preset['ko']
+            st.warning(f"⚠️ {'Simulation Mode' if lang=='en' else '시뮬레이션 모드'}: {sim_mode_label}")
         st.caption(t('map_caption', lang))
 
         if gdf_view is not None and len(gdf_view) > 0:
             m = build_map(gdf_view, show_grades, risk_col)
             st_folium(m, width=None, height=560, returned_objects=[])
         else:
-            st.warning("지도 데이터가 없습니다.")
+            st.warning(t('map_no_data', lang))
 
     # ── TAB 2: 우선점검 목록 ─────────────────────────────────────────────────
     with tab2:
         k = max(1, int(len(df_view) * topk_pct / 100))
-        st.markdown(f"##### 🎯 우선점검 대상 상위 {topk_pct}% — **{k:,}개** 설비")
+        st.markdown(t('list_title', lang).format(topk_pct, k))
         if is_sim:
-            st.warning(f"⚠️ 시뮬레이션 적용: {preset_name}")
+            sim_mode_label2 = sel_preset['en'] if lang == 'en' else sel_preset['ko']
+            st.warning(f"⚠️ {'Simulation Active' if lang=='en' else '시뮬레이션 적용'}: {sim_mode_label2}")
 
         disp_cols = ['pole_id','final_risk','risk_grade','ml_score',
                      'weather_hazard','spatial_exposure','hist_prior','nearest_station']
@@ -887,8 +993,9 @@ def main():
         st.markdown("##### 🔍 설비 상세 분석")
 
         top50 = df_view.nlargest(50, risk_col)['pole_id'].tolist()
-        sel_pole = st.selectbox("설비 선택 (Top-50 고위험)", top50,
-                                format_func=lambda x: f"설비 #{x}")
+        fac_sel_lbl = "Select Facility (Top-50 High Risk)" if lang == 'en' else "설비 선택 (Top-50 고위험)"
+        fac_fmt = (lambda x: f"Facility #{x}") if lang == 'en' else (lambda x: f"설비 #{x}")
+        sel_pole = st.selectbox(fac_sel_lbl, top50, format_func=fac_fmt)
 
         row = df_view[df_view['pole_id'] == sel_pole]
         if not len(row):
@@ -909,7 +1016,7 @@ def main():
                     <div style='color:{color};font-size:1.2em'>
                         {GRADE_EMOJI.get(grade,'')} {GRADE_KR.get(grade,grade)}</div>
                     <div style='color:#666;font-size:0.85em;margin-top:4px'>
-                        설비 #{int(sel_pole)} | {row.get('nearest_station','')} 권역</div>
+                        {'Facility' if lang == 'en' else '설비'} #{int(sel_pole)} | {row.get('nearest_station','')} {'Area' if lang == 'en' else '권역'}</div>
                 </div>
                 """, unsafe_allow_html=True)
 
@@ -1114,8 +1221,9 @@ def main():
             fig, ax = plt.subplots(figsize=(6, 5))
             colors_bar = ['#d62728' if v >= 55 else '#ff7f0e' if v >= 52 else '#2ca02c'
                           for v in stn_risk['mean']]
-            bars = ax.barh(stn_risk['nearest_station'], stn_risk['mean'],
-                           color=colors_bar, alpha=0.85)
+            stn_labels = ([f"{STATION_EN.get(s,s)}" for s in stn_risk['nearest_station']]
+                          if lang == 'en' else list(stn_risk['nearest_station']))
+            bars = ax.barh(stn_labels, stn_risk['mean'], color=colors_bar, alpha=0.85)
             for b, v in zip(bars, stn_risk['mean']):
                 ax.text(v + 0.1, b.get_y() + b.get_height()/2,
                         f'{v:.1f}', va='center', fontsize=9)
@@ -1298,7 +1406,9 @@ def main():
                 ax.set_xticks(range(len(stn_monthly.columns)))
                 ax.set_xticklabels(stn_monthly.columns)
                 ax.set_yticks(range(len(stn_monthly.index)))
-                ax.set_yticklabels(stn_monthly.index)
+                stn_ylabels = ([STATION_EN.get(s, s) for s in stn_monthly.index]
+                               if lang == 'en' else list(stn_monthly.index))
+                ax.set_yticklabels(stn_ylabels)
                 cbar_lbl = 'Avg Weather Hazard' if lang == 'en' else '평균 기상위험도'
                 plt.colorbar(im, ax=ax, label=cbar_lbl)
                 for i in range(stn_monthly.shape[0]):
@@ -1314,24 +1424,37 @@ def main():
     # ── TAB 7: 기상 예보 ─────────────────────────────────────────────────────
     with tab7:
         st.markdown("##### 📡 기상 예보 기반 화재 위험 예보 (3일)")
-        st.caption("기상청 단기예보 API → 설비별 LightGBM 추론 → 향후 3일 화재 위험 예측")
+        st.caption("KMA Short-term Forecast API → LightGBM Inference → 3-Day Fire Risk Prediction"
+                   if lang == 'en' else
+                   "기상청 단기예보 API → 설비별 LightGBM 추론 → 향후 3일 화재 위험 예측")
 
         GRADE_COLORS_F = GRADE_COLORS
         GRADE_KR_F     = GRADE_KR
 
         if not KMA_API_KEY:
-            st.warning("기상청 API Key가 필요합니다.")
-            st.code("# .env 파일에 입력:\nKMA_API_KEY=apihub.kma.go.kr에서_발급한_인증키")
-            st.markdown("""
+            if lang == 'en':
+                st.warning("KMA API Key required.")
+                st.code("# Add to .env file:\nKMA_API_KEY=your_key_from_apihub.kma.go.kr")
+                st.markdown("""
+**How to get the key:**
+1. Sign up at [KMA API Hub](https://apihub.kma.go.kr)
+2. API list → **단기예보 격자자료** → Apply for access
+3. Paste the issued key into `.env` as `KMA_API_KEY=...` and restart the app
+                """)
+            else:
+                st.warning("기상청 API Key가 필요합니다.")
+                st.code("# .env 파일에 입력:\nKMA_API_KEY=apihub.kma.go.kr에서_발급한_인증키")
+                st.markdown("""
 **발급 방법:**
 1. [기상청 API Hub](https://apihub.kma.go.kr) 회원가입
 2. API 목록 → **동네예보(단기예보)** → 활용신청
 3. 발급된 인증키를 `.env` 파일의 `KMA_API_KEY`에 입력 후 앱 재시작
-            """)
+                """)
         else:
             # ── 자동 로드: 캐시 없으면 즉시 수집 ──────────────────────────────
             if 'fc_result' not in st.session_state:
-                with st.spinner("📡 기상청 단기예보 자동 수집 중... (최초 1회)"):
+                spinner_msg = (t('fc_loading', lang))
+                with st.spinner(spinner_msg):
                     try:
                         fc_result, fc_feat = run_full_forecast(KMA_API_KEY, DATA_PROCESSED, df)
                         st.session_state['fc_result'] = fc_result
@@ -1340,15 +1463,18 @@ def main():
                     except Exception as e:
                         st.session_state['fc_result'] = pd.DataFrame()
                         st.session_state['fc_feat']   = pd.DataFrame()
-                        st.error(f"❌ 예보 수집 실패: {e}")
+                        err = f"❌ Forecast fetch failed: {e}" if lang == 'en' else f"❌ 예보 수집 실패: {e}"
+                        st.error(err)
 
             col_info, col_refresh = st.columns([4, 1])
             with col_info:
                 fc_time = st.session_state.get('fc_time', '')
                 if fc_time:
-                    st.caption(f"🕐 최종 수집: {fc_time}")
+                    fc_time_lbl = f"🕐 Last updated: {fc_time}" if lang == 'en' else f"🕐 최종 수집: {fc_time}"
+                    st.caption(fc_time_lbl)
             with col_refresh:
-                if st.button("🔄 새로고침", use_container_width=True):
+                refresh_btn_lbl = t('fc_refresh', lang)
+                if st.button(refresh_btn_lbl, use_container_width=True):
                     for k in ['fc_result','fc_feat','fc_time']:
                         st.session_state.pop(k, None)
                     # 날짜별 recommend 캐시도 삭제
