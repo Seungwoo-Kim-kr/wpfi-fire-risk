@@ -1,0 +1,7 @@
+scenario,top5_overlap_pct,mean
+base,100.0,53.76
+weather_heavy,69.5,56.01
+spatial_heavy,65.1,52.03
+facility_heavy,71.6,53.24
+no_prior,84.8,54.28
+equal,89.4,53.11

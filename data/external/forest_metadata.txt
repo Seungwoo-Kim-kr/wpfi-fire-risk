@@ -1,0 +1,37 @@
+=== 산림청 임상도 (Forest Cover Map) 다운로드 안내 ===
+
+■ 데이터 설명
+  - 전국 산림의 수종, 영급, 밀도, 경급 등을 나타내는 GIS 레이어
+  - 좌표계: EPSG:5179 (Korea 2000 / UTM-K)
+  - 갱신주기: 5년
+
+■ 다운로드 경로 (우선순위 순)
+
+1. 국가공간정보포털 오픈마켓 (무료)
+   URL: http://data.nsdi.go.kr/dataset/20190716ds00002
+   형식: SHP, GeoJSON
+   방법: 회원가입 → 신청 → 승인(1~2일) → 다운로드
+
+2. 산림공간정보서비스 (무료, 직접 다운로드)
+   URL: https://map.forest.go.kr/
+   경로: 산림공간정보 → 임상도 → 다운로드
+   형식: SHP (전국 또는 시도별)
+
+3. 공공데이터포털
+   URL: https://www.data.go.kr/data/3046569/fileData.do
+   형식: SHP
+
+■ 주요 컬럼 (임상도 속성)
+  FRTP_CD    : 임상코드 (1=침엽수, 2=활엽수, 3=혼효림, 4=죽림, 5=무립목지)
+  DENS_CD    : 밀도코드 (1=소, 2=중, 3=밀)
+  AGCLS_CD   : 영급코드 (1령급~6령급+)
+  SLOPE_CD   : 경사코드
+  geometry   : Polygon
+
+■ 활용 계획 (파이프라인)
+  - forest.gpkg 로 저장 후 03_buffer_feature_engineering.ipynb 에서:
+    → forest_ratio_250m, forest_ratio_500m, forest_ratio_1000m
+    → conifer_ratio (침엽수 비율)
+    → distance_to_forest
+
+■ 저장 경로: data/external/forest.gpkg

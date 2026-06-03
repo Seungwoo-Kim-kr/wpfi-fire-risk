@@ -1,0 +1,48 @@
+# ── API Keys & Secrets ─────────────────────────────────────────────────────
+.env
+*.env.*
+
+# ── Python ─────────────────────────────────────────────────────────────────
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.venv/
+venv/
+env/
+
+# ── macOS ──────────────────────────────────────────────────────────────────
+.DS_Store
+.AppleDouble
+
+# ── Large data files (too big for GitHub) ──────────────────────────────────
+# Raw contest data
+data/raw/contest_data_1/
+data/raw/contest_data_1.zip
+data/raw/contest_data_2.zip
+
+# External large spatial/raster datasets
+data/external/dem_tiles/
+data/external/worldcover_tiles/
+data/external/forest.gpkg
+data/external/landuse.gpkg
+data/external/dem.tif
+data/external/worldcover_korea.tif
+
+# Processed data (reproducible from notebooks)
+data/processed/*.parquet
+data/processed/*.gpkg
+data/processed/*.pkl
+data/processed/*.json
+
+# ── Outputs (generated) ────────────────────────────────────────────────────
+outputs/maps/*.html
+reports/*.pdf
+
+# ── Jupyter checkpoints ────────────────────────────────────────────────────
+.ipynb_checkpoints/
+
+# ── IDE ────────────────────────────────────────────────────────────────────
+.vscode/
+.idea/
+*.swp
