@@ -39,6 +39,13 @@ data/processed/*.json
 outputs/maps/*.html
 reports/*.pdf
 
+# Large result tables (>50MB, generated from notebooks)
+outputs/tables/final_risk_table.csv
+outputs/tables/top_20pct_facilities.csv
+
+# Large GeoJSON (>50MB)
+data/external/admin_boundary_sigungu.geojson
+
 # ── Jupyter checkpoints ────────────────────────────────────────────────────
 .ipynb_checkpoints/
 
