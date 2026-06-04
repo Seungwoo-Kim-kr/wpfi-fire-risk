@@ -1,2 +1,2 @@
-hit_rate_pct,radius_m,n_fires
-73.7,500,2636
+hit_rate_pct,n_fires,n_top5,radius_m
+100.0,1676,69391,500
