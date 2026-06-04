@@ -17,6 +17,27 @@ from streamlit_folium import st_folium
 import matplotlib
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
+import matplotlib.font_manager as _fm
+
+# ── 한글 폰트 전역 설정 ────────────────────────────────────────────────────────
+def _setup_korean_font():
+    """앱 전체에서 사용할 한글 폰트를 설정한다."""
+    candidates = [
+        'Apple SD Gothic Neo',   # macOS 기본 한글 폰트 (권장)
+        'AppleGothic',           # macOS 구버전 폰트
+        'NanumGothic',           # 나눔고딕 (설치된 경우)
+        'Malgun Gothic',         # Windows
+        'DejaVu Sans',           # 폴백 (한글 미지원, 박스 표시)
+    ]
+    available = {f.name for f in _fm.fontManager.ttflist}
+    for font in candidates:
+        if font in available:
+            matplotlib.rcParams['font.family'] = font
+            matplotlib.rcParams['axes.unicode_minus'] = False
+            return font
+    return 'DejaVu Sans'
+
+_KO_FONT = _setup_korean_font()
 
 ROOT = Path(__file__).parent
 sys.path.insert(0, str(ROOT))
@@ -68,6 +89,7 @@ TRANSLATIONS = {
     'tab_spatial':   {'ko': '📈 공간 분포',            'en': '📈 Spatial Distribution'},
     'tab_trend':     {'ko': '📅 트렌드 분석',          'en': '📅 Trend Analysis'},
     'tab_forecast':  {'ko': '📡 기상 예보',            'en': '📡 Weather Forecast'},
+    'tab_method':    {'ko': '🧮 산출 방식',            'en': '🧮 Methodology'},
     # 지도 탭
     'map_title':     {'ko': '##### 📍 강원도 전봇대 화재위험도 지도', 'en': '##### 📍 Gangwon Power Pole Fire Risk Map'},
     'map_caption':   {'ko': '등급별 상위 3,000개 표시 | 마커 클릭 시 상세 정보', 'en': 'Top 3,000 per grade | Click markers for details'},
@@ -117,8 +139,8 @@ TRANSLATIONS = {
     # 기타
     'popup_main_cause': {'ko': '[주요]', 'en': '[Main]'},
     'popup_sub_cause':  {'ko': '[보조]', 'en': '[Sub]'},
-    'footer': {'ko': 'WPFI v3.0 · 2026 날씨 빅데이터 콘테스트 · Explainable GeoAI<br>강원도 전봇대 1,387,831개 분석 | LightGBM AUC 0.9982',
-               'en': 'WPFI v3.0 · 2026 Weather Big Data Contest · Explainable GeoAI<br>1,387,831 Power Poles in Gangwon, Korea | LightGBM AUC 0.9982'},
+    'footer': {'ko': 'WPFI v3.1 · 2026 날씨 빅데이터 콘테스트 · Explainable GeoAI<br>강원도 전봇대 1,387,831개 분석 | LightGBM AUC 0.9574 | FWI+누적위험+연쇄피해 모델',
+               'en': 'WPFI v3.1 · 2026 Weather Big Data Contest · Explainable GeoAI<br>1,387,831 Power Poles in Gangwon, Korea | LightGBM AUC 0.9574 | FWI+Accumulated+Cascade Model'},
 }
 
 def t(key: str, lang: str = 'ko') -> str:
@@ -193,12 +215,14 @@ STATION_EN = {
     "삼척": "Samcheok",   "태백": "Taebaek",   "속초": "Sokcho",
 }
 
-# 실제 데이터에서 역산한 등급 임계값 (노트북 분위수 기반)
-# Very High: 58.28~78.92, High: 55.06~58.28, Moderate: 50.83~55.06, Low: 35.72~50.83
+# ML 확률 절대값 기반 등급 임계값 (ml_fire_prob_max 기준)
+# Very High: 0.20 이상 — 모델이 화재 조건으로 판단 (5회 중 1회 수준)
+# High:      0.05 이상 — 위험 기상 지속 중
+# Moderate:  0.01 이상 — 평균 이상 주의 필요
 GRADE_THRESHOLDS_ACTUAL = {
-    "Very High": 58.28,
-    "High":      55.06,
-    "Moderate":  50.83,
+    "Very High": 48.4,   # combined_risk 기준 (ml_prob >= 0.20)
+    "High":      38.2,   # combined_risk 기준 (ml_prob >= 0.05)
+    "Moderate":  23.8,   # combined_risk 기준 (ml_prob >= 0.01)
 }
 
 # ── 데이터 로드 ────────────────────────────────────────────────────────────────
@@ -336,46 +360,91 @@ Analysis Data:
     return result if result and not result.startswith("[OpenAI") else default
 
 
+@st.cache_resource
+def _load_rag():
+    """RAG 코퍼스 로드 (캐시)"""
+    try:
+        import pickle as _pkl
+        from sklearn.metrics.pairwise import cosine_similarity as _cos
+        rag_path = DATA_PROCESSED / 'rag_corpus.pkl'
+        if not rag_path.exists():
+            return None
+        with open(rag_path, 'rb') as f:
+            data = _pkl.load(f)
+        return data
+    except Exception:
+        return None
+
+
+def _rag_search(query: str, top_k: int = 2) -> str:
+    """쿼리와 유사한 참조 문서 반환 (텍스트)"""
+    try:
+        from sklearn.metrics.pairwise import cosine_similarity
+        rag = _load_rag()
+        if rag is None:
+            return ""
+        q_vec = rag['vectorizer'].transform([query])
+        scores = cosine_similarity(q_vec, rag['tfidf_matrix']).flatten()
+        top_idx = scores.argsort()[::-1][:top_k]
+        refs = []
+        for i in top_idx:
+            if scores[i] > 0.05:
+                refs.append(f"[{rag['docs'][i]['category']}] {rag['docs'][i]['text'][:150]}")
+        return "\n".join(refs)
+    except Exception:
+        return ""
+
+
 def get_facility_explanation(row: dict, lang: str = 'ko') -> str:
     grade_label = (GRADE_KR if lang == 'ko' else GRADE_EN).get(row.get('risk_grade', ''), '')
+
+    # RAG: 기상 조건 기반 유사 사례 검색
+    wh  = row.get('weather_hazard', 0)
+    fwi = row.get('fwi_score', row.get('ml_fire_prob_max', 0) * 30)
+    acc = row.get('accumulated_risk_norm', 0)
+    rag_query = f"기상위험 {wh:.0f} FWI {fwi:.1f} 누적건조 {acc:.0f} 전봇대 화재위험"
+    rag_context = _rag_search(rag_query, top_k=2)
+
     if lang == 'en':
         default = (
-            f"Facility #{row.get('pole_id','')} has weather hazard {row.get('weather_hazard',0):.0f} "
+            f"Facility #{row.get('pole_id','')} has weather hazard {wh:.0f} "
             f"and spatial exposure {row.get('spatial_exposure',0):.0f} as primary risk factors. "
             f"Grade: {grade_label} ({row.get('final_risk',0):.1f}/100). "
             f"Recommend insulation resistance test and on-site inspection."
         )
+        rag_section = f"\n\nReference knowledge:\n{rag_context}" if rag_context else ""
         prompt = f"""Explain this power facility fire risk analysis in 3 sentences for a field inspection engineer.
-Do not add information beyond the given values.
+Base your explanation on the facility data and reference knowledge below.
 
 Facility ID: {row.get('pole_id','')}
 Risk Grade: {grade_label} ({row.get('final_risk',0):.1f}/100)
-ML Fire Probability Score: {row.get('ml_score',0):.1f}/100
-Weather Hazard: {row.get('weather_hazard',0):.1f} | Spatial Exposure: {row.get('spatial_exposure',0):.1f}
-Facility Exposure: {row.get('facility_exposure',0):.1f} | Fire History: {row.get('hist_prior',0):.1f}
+ML Fire Probability: {row.get('ml_fire_prob_max',0):.4f}
+Weather Hazard: {wh:.1f} | FWI Score: {fwi:.1f} | Accumulated Risk: {acc:.1f}
+Spatial Exposure: {row.get('spatial_exposure',0):.1f} | Cascade Risk: {row.get('cascade_risk',0):.1f}
 Station Area: {row.get('nearest_station','')}
-Include specific preventive actions."""
+Include specific preventive actions.{rag_section}"""
         system = "You are a power facility safety inspection expert. Answer in English."
     else:
         default = (
-            f"설비 #{row.get('pole_id','')}은(는) 기상위험 {row.get('weather_hazard',0):.0f}점, "
+            f"설비 #{row.get('pole_id','')}은(는) 기상위험 {wh:.0f}점, "
             f"공간노출 {row.get('spatial_exposure',0):.0f}점이 주요 위험요인으로, "
             f"{grade_label} 등급({row.get('final_risk',0):.1f}점)입니다. "
             f"절연 저항 측정 및 현장 점검이 권고됩니다."
         )
+        rag_section = f"\n\n참조 지식:\n{rag_context}" if rag_context else ""
         prompt = f"""전력설비 화재위험 분석 결과를 현장 점검 엔지니어용으로 3문장 설명하세요.
-수치 범위를 벗어난 내용을 추가하지 마세요.
+아래 설비 데이터와 참조 지식을 근거로 설명하세요.
 
 설비ID: {row.get('pole_id','')}
 위험등급: {grade_label} ({row.get('final_risk',0):.1f}/100)
-ML 화재확률 점수: {row.get('ml_score',0):.1f}/100
-기상위험: {row.get('weather_hazard',0):.1f} | 공간노출: {row.get('spatial_exposure',0):.1f}
-설비노출: {row.get('facility_exposure',0):.1f} | 화재이력: {row.get('hist_prior',0):.1f}
+ML 화재확률: {row.get('ml_fire_prob_max',0):.4f}
+기상위험: {wh:.1f} | FWI 지수: {fwi:.1f} | 누적위험도: {acc:.1f}
+공간노출: {row.get('spatial_exposure',0):.1f} | 연쇄피해위험: {row.get('cascade_risk',0):.1f}
 관할관측소: {row.get('nearest_station','')}
-권고사항: 현장 점검 및 예방 조치를 구체적으로 포함"""
-        system = "당신은 전력설비 안전 점검 전문가입니다."
+구체적 예방 조치 포함.{rag_section}"""
+        system = "당신은 전력설비 안전 점검 전문가입니다. 참조 지식을 활용해 근거 있는 설명을 제공하세요."
 
-    result = _openai_chat(prompt, system=system, max_tokens=300)
+    result = _openai_chat(prompt, system=system, max_tokens=350)
     return result if result and not result.startswith("[OpenAI") else default
 
 
@@ -485,82 +554,74 @@ Very High 예측 설비: {vh_cnt:,}개 / High: {hi_cnt:,}개
 
 # ── 위험 판단 사유 생성 (규칙 기반) ──────────────────────────────────────────
 def _risk_reason(row: dict) -> str:
-    """4개 컴포넌트 점수를 분석해 이해하기 쉬운 판단 사유 반환 (언어 자동 감지)"""
-    wh = float(row.get('weather_hazard',   0))
-    sp = float(row.get('spatial_exposure', 0))
-    fe = float(row.get('facility_exposure',0))
-    hp = float(row.get('hist_prior',       0))
+    """ML 확률 + 컴포넌트 점수 기반 설명 (등급별 차별화)"""
+    prob = float(row.get('ml_fire_prob_max', 0))
+    grade = str(row.get('risk_grade', 'Low'))
+    sp  = float(row.get('spatial_exposure',  0))
+    fe  = float(row.get('facility_exposure', 0))
+    hp  = float(row.get('hist_prior',        0))
+    cas = float(row.get('cascade_risk',      0))
+    ter = float(row.get('terrain_fire_risk', 0))
     _lang = st.session_state.get('lang', 'ko')
 
-    weighted = {
-        'weather':  wh * WEIGHTS['weather'],
-        'spatial':  sp * WEIGHTS['spatial'],
-        'facility': fe * WEIGHTS['facility'],
-        'prior':    hp * WEIGHTS['prior'],
-    }
-    ranked = sorted(weighted, key=weighted.get, reverse=True)
-    top1, top2 = ranked[0], ranked[1]
-
     if _lang == 'en':
-        def _wh_text(v):
-            if v >= 80: return "Extremely dry and windy conditions — very high fire ignition and spread risk"
-            if v >= 65: return "Low humidity and strong winds create conditions for rapid fire spread"
-            return "Moderately dry or windy conditions — monitor closely"
-        def _sp_text(v):
-            if v >= 75: return "High forest coverage and steep slope — large-scale spread likely if fire occurs"
-            if v >= 55: return "Adjacent to forest with terrain favoring fire propagation"
-            return "Some nearby forest — limited but present fire spread potential"
-        def _fe_text(v):
-            if v >= 75: return "Dense cluster of facilities nearby — high cascading failure risk"
-            if v >= 55: return "High local facility density — wide impact zone if fire occurs"
-            return "Moderate facility exposure — continuous monitoring recommended"
-        def _hp_text(v):
-            if v >= 65: return "Repeat fire incidents (electrical + wildfire) recorded in this zone"
-            if v >= 50: return "Some fire history — risk pattern may recur"
-            return "Low fire history, but other factors elevate risk"
-        labels = {'weather':'Weather','spatial':'Terrain','facility':'Facility','prior':'History'}
-        _main, _sub = '[Main]', '[Sub]'
-        flags_map = {
-            wh >= 75: "🚨 Extreme Weather",
-            sp >= 70: "🌲 High Forest Risk",
-            hp >= 60: "🔥 Repeat Fire Zone",
-            fe >= 75: "⚡ Dense Facility Zone",
-        }
+        # ML 확률 기반 주 설명
+        if grade == 'Very High':
+            main = f"ML model estimates {prob*100:.1f}% fire probability — actual wildfire conditions recorded nearby. Immediate inspection required."
+        elif grade == 'High':
+            main = f"ML model estimates {prob*100:.1f}% fire probability — elevated risk from dry/windy weather patterns."
+        elif grade == 'Moderate':
+            main = f"ML model estimates {prob*100:.1f}% fire probability — above-average risk, monitor weather closely."
+        else:
+            main = f"ML fire probability {prob*100:.2f}% — within normal range under current weather conditions."
+
+        # 공간·설비 보조 설명 (실제 차이 있는 값 기준)
+        sub_parts = []
+        if sp >= 60:  sub_parts.append(f"Forest/terrain exposure high ({sp:.0f})")
+        elif sp >= 40: sub_parts.append(f"Moderate forest proximity ({sp:.0f})")
+        if fe >= 65:  sub_parts.append(f"Dense facility cluster (cascade risk {cas:.0f})")
+        elif fe >= 50: sub_parts.append(f"Moderate facility density ({fe:.0f})")
+        if hp >= 65:  sub_parts.append("Repeat fire history zone")
+        if ter >= 60: sub_parts.append("High terrain fire exposure")
+        sub = " · ".join(sub_parts) if sub_parts else "No significant spatial risk factors"
+
+        flags = []
+        if prob >= 0.5:  flags.append("🚨 Very High ML Risk")
+        if prob >= 0.2:  flags.append("🔴 High ML Risk")
+        elif prob >= 0.05: flags.append("🟠 Elevated Risk")
+        if cas >= 50:    flags.append("⚡ Cascade Risk")
+        if hp >= 70:     flags.append("🔥 Repeat Fire Zone")
+
     else:
-        def _wh_text(v):
-            if v >= 80: return "건조·강풍 조건이 매우 심각해 화재 발화·확산 위험이 극도로 높습니다"
-            if v >= 65: return "습도가 낮고 바람이 강해 불씨가 발생하면 빠르게 번질 수 있는 조건입니다"
-            return "기상 조건이 다소 건조하거나 바람이 있어 주의가 필요합니다"
-        def _sp_text(v):
-            if v >= 75: return "반경 내 산림 비율이 높고 경사가 가팔라 화재 시 대규모 확산이 우려됩니다"
-            if v >= 55: return "산림과 인접하고 지형상 화재가 퍼지기 쉬운 구조입니다"
-            return "주변에 산림이 일부 있어 화재 확산 가능성이 존재합니다"
-        def _fe_text(v):
-            if v >= 75: return "주변에 전력설비가 밀집되어 있어 연쇄 피해 가능성이 큽니다"
-            if v >= 55: return "인근 설비 밀도가 높아 한 곳에서 화재 발생 시 파급 범위가 넓습니다"
-            return "설비 노출 수준이 보통이나 지속 모니터링이 필요합니다"
-        def _hp_text(v):
-            if v >= 65: return "이 지역은 과거에도 전기화재·산불이 반복 발생한 이력이 있는 고위험 구역입니다"
-            if v >= 50: return "과거 화재 이력이 있어 위험 패턴이 반복될 가능성이 있습니다"
-            return "과거 화재 이력은 낮으나 다른 요인이 위험을 높이고 있습니다"
-        labels = {'weather':'기상','spatial':'지형','facility':'설비','prior':'이력'}
-        _main, _sub = '[주요]', '[보조]'
-        flags_map = {
-            wh >= 75: "🚨 극고위험 기상",
-            sp >= 70: "🌲 고위험 산림노출",
-            hp >= 60: "🔥 반복 화재지역",
-            fe >= 75: "⚡ 설비 밀집위험",
-        }
+        # ML 확률 기반 주 설명 (등급별로 다른 문구)
+        if grade == 'Very High':
+            main = f"ML 모델이 화재 확률 {prob*100:.1f}%로 판단 — 실제 산불 발생 조건과 유사한 기상·공간 상태입니다. 즉각 점검이 필요합니다."
+        elif grade == 'High':
+            main = f"ML 모델이 화재 확률 {prob*100:.1f}%로 판단 — 건조·강풍 기상이 지속되며 위험 수준이 높아진 상태입니다."
+        elif grade == 'Moderate':
+            main = f"ML 모델이 화재 확률 {prob*100:.2f}%로 판단 — 평균 이상의 위험 조건이 일부 존재합니다. 기상 모니터링을 강화하세요."
+        else:
+            main = f"ML 화재 확률 {prob*100:.3f}% — 현재 기상 조건에서 정상 범위 이내입니다."
 
-    text_fn = {'weather': _wh_text, 'spatial': _sp_text,
-               'facility': _fe_text, 'prior': _hp_text}
-    vals = {'weather': wh, 'spatial': sp, 'facility': fe, 'prior': hp}
+        # 공간·설비 보조 설명 (설비마다 실제로 다른 값)
+        sub_parts = []
+        if sp >= 60:   sub_parts.append(f"산림·지형 노출도 높음({sp:.0f}점)")
+        elif sp >= 40: sub_parts.append(f"산림 인접 보통({sp:.0f}점)")
+        if fe >= 65:   sub_parts.append(f"설비 밀집, 연쇄피해 위험({cas:.0f}점)")
+        elif fe >= 50: sub_parts.append(f"설비 밀도 보통({fe:.0f}점)")
+        if hp >= 65:   sub_parts.append("반복 화재 발생 이력 지역")
+        if ter >= 60:  sub_parts.append("지형 화재 노출도 높음")
+        sub = " · ".join(sub_parts) if sub_parts else "공간적 위험 요인 낮음"
 
-    reason = (
-        f"<b>{_main}</b> {labels[top1]}: {text_fn[top1](vals[top1])}<br>"
-        f"<b>{_sub}</b> {labels[top2]}: {text_fn[top2](vals[top2])}"
-    )
-    flags = [v for k, v in flags_map.items() if k]
+        flags = []
+        if prob >= 0.5:   flags.append("🚨 ML 극고위험")
+        elif prob >= 0.2: flags.append("🔴 ML 매우높음")
+        elif prob >= 0.05: flags.append("🟠 ML 높음")
+        elif prob >= 0.01: flags.append("🟡 ML 보통")
+        if cas >= 50:     flags.append("⚡ 연쇄피해위험")
+        if hp >= 70:      flags.append("🔥 반복화재지역")
+
+    reason = f"{main}<br><small style='color:#666'>{sub}</small>"
     if flags:
         reason += "<br><b>" + " &nbsp; ".join(flags) + "</b>"
     return reason
@@ -625,6 +686,8 @@ def build_map(df_merged, selected_grades, risk_col='final_risk', max_points=3000
 
 # ── SHAP Waterfall ────────────────────────────────────────────────────────────
 def shap_waterfall(pole_id, df, model, features):
+    matplotlib.rcParams['font.family'] = _KO_FONT
+    matplotlib.rcParams['axes.unicode_minus'] = False
     try:
         import shap
         tf_path = DATA_PROCESSED / 'train_features.parquet'
@@ -707,43 +770,177 @@ def main():
         initial_sidebar_state="expanded",
     )
 
+    # ── 전역 CSS (Glassmorphism + 다크 테마 최적화) ──────────────────────────
+    st.markdown("""
+<style>
+/* ── 전체 레이아웃 ── */
+.main .block-container { padding-top: 1rem; max-width: 1400px; }
+
+/* ── 글래스모피즘 카드 ── */
+.glass-card {
+    background: rgba(255,255,255,0.05);
+    border: 1px solid rgba(255,255,255,0.12);
+    border-radius: 16px;
+    padding: 20px 24px;
+    backdrop-filter: blur(12px);
+    -webkit-backdrop-filter: blur(12px);
+    box-shadow: 0 4px 24px rgba(0,0,0,0.3);
+    margin-bottom: 16px;
+    transition: transform 0.2s, box-shadow 0.2s;
+}
+.glass-card:hover { transform: translateY(-2px); box-shadow: 0 8px 32px rgba(0,0,0,0.4); }
+
+/* ── KPI 메트릭 카드 ── */
+.kpi-card {
+    background: linear-gradient(135deg, rgba(255,255,255,0.08) 0%, rgba(255,255,255,0.03) 100%);
+    border: 1px solid rgba(255,255,255,0.1);
+    border-radius: 14px;
+    padding: 18px 20px;
+    text-align: center;
+    position: relative;
+    overflow: hidden;
+}
+.kpi-card::before {
+    content: '';
+    position: absolute; top: 0; left: 0; right: 0; height: 3px;
+    border-radius: 14px 14px 0 0;
+}
+.kpi-vh::before  { background: linear-gradient(90deg, #d62728, #ff4444); }
+.kpi-hi::before  { background: linear-gradient(90deg, #ff7f0e, #ffaa44); }
+.kpi-mod::before { background: linear-gradient(90deg, #f7c948, #ffe066); }
+.kpi-low::before { background: linear-gradient(90deg, #2ca02c, #44cc44); }
+.kpi-auc::before { background: linear-gradient(90deg, #1f77b4, #66aadd); }
+.kpi-num {
+    font-size: 2rem; font-weight: 800; margin: 8px 0 4px;
+    background: linear-gradient(135deg, #fff 60%, rgba(255,255,255,0.6));
+    -webkit-background-clip: text; -webkit-text-fill-color: transparent;
+}
+.kpi-label { font-size: 0.75rem; color: rgba(255,255,255,0.6); text-transform: uppercase; letter-spacing: 1px; }
+.kpi-sub   { font-size: 0.8rem;  color: rgba(255,255,255,0.45); margin-top: 4px; }
+
+/* ── 헤더 그래디언트 ── */
+.hero-header {
+    background: linear-gradient(135deg, #0f1117 0%, #1a1d2e 40%, #0d1b2a 100%);
+    border: 1px solid rgba(214,39,40,0.3);
+    border-radius: 20px;
+    padding: 28px 36px;
+    margin-bottom: 20px;
+    position: relative;
+    overflow: hidden;
+}
+.hero-header::after {
+    content: '';
+    position: absolute; top: -50%; right: -10%;
+    width: 300px; height: 300px;
+    background: radial-gradient(circle, rgba(214,39,40,0.15) 0%, transparent 70%);
+    pointer-events: none;
+}
+.hero-title {
+    font-size: 2.4rem; font-weight: 900; margin: 0;
+    background: linear-gradient(135deg, #ff4444 0%, #ff7f0e 100%);
+    -webkit-background-clip: text; -webkit-text-fill-color: transparent;
+    letter-spacing: -0.5px;
+}
+.hero-sub { color: rgba(255,255,255,0.75); font-size: 1.05rem; margin: 6px 0 0; }
+.hero-badge {
+    display: inline-block; background: rgba(214,39,40,0.2);
+    border: 1px solid rgba(214,39,40,0.4); color: #ff6b6b;
+    border-radius: 20px; padding: 3px 12px; font-size: 0.75rem;
+    margin-right: 6px; margin-top: 8px;
+}
+
+/* ── 위험 등급 배지 ── */
+.badge-vh { background:rgba(214,39,40,0.2); border:1px solid #d62728; color:#ff6b6b; border-radius:8px; padding:3px 10px; font-size:0.85rem; font-weight:600; }
+.badge-hi { background:rgba(255,127,14,0.2); border:1px solid #ff7f0e; color:#ffaa44; border-radius:8px; padding:3px 10px; font-size:0.85rem; font-weight:600; }
+.badge-mo { background:rgba(247,201,72,0.2); border:1px solid #f7c948; color:#ffe066; border-radius:8px; padding:3px 10px; font-size:0.85rem; font-weight:600; }
+.badge-lo { background:rgba(44,160,44,0.2); border:1px solid #2ca02c; color:#44cc44; border-radius:8px; padding:3px 10px; font-size:0.85rem; font-weight:600; }
+
+/* ── 사이드바 ── */
+[data-testid="stSidebar"] {
+    background: linear-gradient(180deg, #0d1117 0%, #161b22 100%);
+    border-right: 1px solid rgba(255,255,255,0.08);
+}
+[data-testid="stSidebar"] .stMetric {
+    background: rgba(255,255,255,0.04);
+    border-radius: 10px; padding: 10px 14px; margin-bottom: 8px;
+    border: 1px solid rgba(255,255,255,0.08);
+}
+
+/* ── 탭 스타일 ── */
+.stTabs [data-baseweb="tab-list"] { gap: 4px; }
+.stTabs [data-baseweb="tab"] {
+    border-radius: 8px 8px 0 0;
+    padding: 8px 16px; font-size: 0.88rem;
+    background: rgba(255,255,255,0.04);
+    border: 1px solid rgba(255,255,255,0.06);
+    transition: all 0.2s;
+}
+.stTabs [aria-selected="true"] {
+    background: rgba(214,39,40,0.2) !important;
+    border-color: rgba(214,39,40,0.5) !important;
+    color: #ff6b6b !important;
+}
+
+/* ── expander ── */
+[data-testid="stExpander"] {
+    border: 1px solid rgba(255,255,255,0.08) !important;
+    border-radius: 12px !important;
+    background: rgba(255,255,255,0.03) !important;
+}
+
+/* ── 데이터프레임 ── */
+[data-testid="stDataFrame"] { border-radius: 10px; overflow: hidden; }
+
+/* ── 알림 박스 ── */
+.stAlert { border-radius: 10px !important; }
+
+/* ── 스크롤바 ── */
+::-webkit-scrollbar { width: 6px; height: 6px; }
+::-webkit-scrollbar-track { background: rgba(255,255,255,0.02); }
+::-webkit-scrollbar-thumb { background: rgba(255,255,255,0.15); border-radius: 3px; }
+</style>
+""", unsafe_allow_html=True)
+
     # ── 언어 설정 (사이드바 상단) ────────────────────────────────────────────
-    # session_state 기본값
     if 'lang' not in st.session_state:
         st.session_state['lang'] = 'ko'
 
     with st.sidebar:
         lang_col1, lang_col2 = st.columns([3, 2])
         with lang_col2:
+            _lang_idx = 0 if st.session_state.get('lang', 'ko') == 'ko' else 1
             lang_choice = st.selectbox(
                 "🌐", ['🇰🇷 한국어', '🇺🇸 English'],
-                index=0 if st.session_state['lang'] == 'ko' else 1,
+                index=_lang_idx,
                 label_visibility="collapsed",
-                key="lang_selector",
             )
             st.session_state['lang'] = 'ko' if '한국어' in lang_choice else 'en'
 
     lang = st.session_state['lang']
 
-    # 언어별 matplotlib 폰트
-    if lang == 'ko':
-        plt.rcParams['font.family'] = 'AppleGothic'
-    else:
-        plt.rcParams['font.family'] = 'DejaVu Sans'
-    plt.rcParams['axes.unicode_minus'] = False
+    matplotlib.rcParams['font.family'] = _KO_FONT
+    matplotlib.rcParams['axes.unicode_minus'] = False
 
     GRADE_LABEL = GRADE_KR if lang == 'ko' else GRADE_EN
 
-    # ── 헤더 ─────────────────────────────────────────────────────────────────
+    # ── 히어로 헤더 ──────────────────────────────────────────────────────────
+    if lang == 'ko':
+        hero_title = "🔥 WPFI"
+        hero_sub   = "기상·공간정보 기반 전력설비 화재위험도 분석 시스템"
+        badges     = ["2026 날씨 빅데이터 콘테스트", "강원도 1,387,831개 전봇대", "LightGBM · SHAP · RAG"]
+    else:
+        hero_title = "🔥 WPFI"
+        hero_sub   = "Weather-based Power Facility Fire-risk Index System"
+        badges     = ["2026 Weather Big Data Contest", "1,387,831 Gangwon Poles", "LightGBM · SHAP · RAG"]
+
+    badge_html = "".join(f"<span class='hero-badge'>{b}</span>" for b in badges)
     st.markdown(f"""
-    <div style='text-align:center;padding:10px 0 4px'>
-        <h1 style='color:#d62728;margin:0'>🔥 WPFI</h1>
-        <h3 style='color:#444;margin:0'>{t('title', lang)}</h3>
-        <p style='color:#888;font-size:0.85em;margin:4px 0'>
-        {t('subtitle', lang).replace(chr(10), '<br>')}
-        </p>
-    </div><hr style='margin:8px 0'>
-    """, unsafe_allow_html=True)
+<div class='hero-header'>
+  <div class='hero-title'>{hero_title}</div>
+  <div class='hero-sub'>{hero_sub}</div>
+  <div style='margin-top:10px'>{badge_html}</div>
+</div>
+""", unsafe_allow_html=True)
 
     # 데이터 로드
     df    = load_risk()
@@ -766,9 +963,72 @@ def main():
     else:
         gdf_merged = None
 
+    # ── KPI 카드 (헤더 바로 아래) ─────────────────────────────────────────────
+    total_fac = len(df)
+    vh_cnt = (df['risk_grade'] == 'Very High').sum()
+    hi_cnt = (df['risk_grade'] == 'High').sum()
+    lo_cnt = (df['risk_grade'] == 'Low').sum()
+    auc_val = perf['model_perf']['auc'].max() if 'model_perf' in perf else 0
+    top10_recall = 0.828  # Recall@Top10% 고정값
+
+    unit = "개" if lang == 'ko' else ""
+    kpi_labels = {
+        'vh':  ("🔴 매우높음", "즉각 점검 대상") if lang == 'ko' else ("🔴 Very High", "Immediate action"),
+        'hi':  ("🟠 높음",    "중점 모니터링")   if lang == 'ko' else ("🟠 High",      "Close monitoring"),
+        'lo':  ("🟢 낮음",    "정상 범위")        if lang == 'ko' else ("🟢 Low",       "Normal range"),
+        'auc': ("🤖 모델 AUC", "LightGBM")        if lang == 'ko' else ("🤖 Model AUC", "LightGBM"),
+        'r10': ("📊 Recall@Top10%", "상위 10% 점검 효율") if lang == 'ko' else ("📊 Recall@Top10%", "Inspection efficiency"),
+    }
+
+    st.markdown(f"""
+<div style='display:grid;grid-template-columns:repeat(5,1fr);gap:12px;margin-bottom:20px'>
+
+  <div class='kpi-card kpi-vh'>
+    <div class='kpi-label'>{kpi_labels['vh'][0]}</div>
+    <div class='kpi-num'>{vh_cnt:,}</div>
+    <div class='kpi-sub'>{kpi_labels['vh'][1]}</div>
+  </div>
+
+  <div class='kpi-card kpi-hi'>
+    <div class='kpi-label'>{kpi_labels['hi'][0]}</div>
+    <div class='kpi-num'>{hi_cnt:,}</div>
+    <div class='kpi-sub'>{kpi_labels['hi'][1]}</div>
+  </div>
+
+  <div class='kpi-card kpi-low'>
+    <div class='kpi-label'>{kpi_labels['lo'][0]}</div>
+    <div class='kpi-num'>{lo_cnt:,}</div>
+    <div class='kpi-sub'>{kpi_labels['lo'][1]}</div>
+  </div>
+
+  <div class='kpi-card kpi-auc'>
+    <div class='kpi-label'>{kpi_labels['auc'][0]}</div>
+    <div class='kpi-num'>{auc_val:.4f}</div>
+    <div class='kpi-sub'>{kpi_labels['auc'][1]}</div>
+  </div>
+
+  <div class='kpi-card kpi-auc'>
+    <div class='kpi-label'>{kpi_labels['r10'][0]}</div>
+    <div class='kpi-num'>{top10_recall:.1%}</div>
+    <div class='kpi-sub'>{kpi_labels['r10'][1]}</div>
+  </div>
+
+</div>
+""", unsafe_allow_html=True)
+
     # ── 사이드바 ──────────────────────────────────────────────────────────────
     with st.sidebar:
-        st.markdown(f"### {t('filter', lang)}")
+        # 사이드바 로고
+        st.markdown("""
+<div style='text-align:center;padding:12px 0 8px'>
+  <span style='font-size:2rem'>🔥</span>
+  <div style='font-size:1.2rem;font-weight:800;letter-spacing:2px;color:#ff6b6b'>WPFI</div>
+  <div style='font-size:0.7rem;color:rgba(255,255,255,0.4);letter-spacing:1px'>FIRE RISK SYSTEM</div>
+</div>
+<hr style='border-color:rgba(255,255,255,0.08);margin:8px 0 16px'>
+""", unsafe_allow_html=True)
+
+        st.markdown(f"#### {t('filter', lang)}")
 
         # 위험등급 필터
         st.markdown(f"**{t('grade_display', lang)}**")
@@ -850,18 +1110,46 @@ def main():
             else:
                 st.warning(f"⚠️ 시뮬레이션 적용 중: {sel_preset['ko']}\nVery High: {orig_vh:,} → {sim_vh:,} ({delta:+,})")
 
-        st.markdown("---")
-        st.markdown(f"### {t('stats_lbl', lang)}")
+        st.markdown("<hr style='border-color:rgba(255,255,255,0.08)'>", unsafe_allow_html=True)
+        st.markdown(f"#### {t('stats_lbl', lang)}")
         total = len(df_sim)
         vh    = (df_sim['risk_grade'] == 'Very High').sum()
+        hi_s  = (df_sim['risk_grade'] == 'High').sum()
         unit  = "개" if lang == 'ko' else ""
+
+        # 위험도 비율 프로그레스 바 스타일 카드
+        for grade, cnt, color in [
+            ('Very High', vh,   '#d62728'),
+            ('High',      hi_s, '#ff7f0e'),
+        ]:
+            pct = cnt / max(total, 1) * 100
+            lbl = GRADE_KR.get(grade, grade) if lang == 'ko' else grade
+            st.markdown(f"""
+<div style='margin:6px 0;padding:10px 14px;background:rgba(255,255,255,0.04);
+            border-radius:10px;border:1px solid rgba(255,255,255,0.06)'>
+  <div style='display:flex;justify-content:space-between;font-size:0.8rem'>
+    <span style='color:rgba(255,255,255,0.7)'>{GRADE_EMOJI[grade]} {lbl}</span>
+    <span style='color:{color};font-weight:700'>{cnt:,}{unit}</span>
+  </div>
+  <div style='background:rgba(255,255,255,0.08);border-radius:4px;height:4px;margin-top:6px'>
+    <div style='background:{color};width:{min(pct*3,100):.1f}%;height:4px;border-radius:4px;
+                transition:width 0.5s ease'></div>
+  </div>
+  <div style='font-size:0.7rem;color:rgba(255,255,255,0.4);margin-top:2px'>{pct:.2f}%</div>
+</div>
+""", unsafe_allow_html=True)
+
         st.metric(t('total_fac', lang), f"{total:,}{unit}")
-        st.metric("Very High", f"{vh:,}{unit} ({vh/total*100:.0f}%)")
-        if model:
-            st.success("✅ LightGBM " + ("로드됨" if lang == 'ko' else "Loaded"))
-            if 'model_perf' in perf:
-                auc = perf['model_perf']['auc'].max()
-                st.metric("AUC", f"{auc:.4f}")
+        if model and 'model_perf' in perf:
+            auc = perf['model_perf']['auc'].max()
+            st.markdown(f"""
+<div style='margin-top:8px;padding:10px 14px;background:rgba(31,119,180,0.15);
+            border-radius:10px;border:1px solid rgba(31,119,180,0.3)'>
+  <div style='font-size:0.75rem;color:rgba(255,255,255,0.5)'>🤖 LightGBM Model</div>
+  <div style='font-size:1.3rem;font-weight:800;color:#66aadd'>AUC {auc:.4f}</div>
+  <div style='font-size:0.7rem;color:rgba(255,255,255,0.4)'>{"로드됨 ✅" if lang == "ko" else "Loaded ✅"}</div>
+</div>
+""", unsafe_allow_html=True)
 
     # ── 권역 필터 ─────────────────────────────────────────────────────────────
     df_view = df_sim.copy()
@@ -919,11 +1207,11 @@ def main():
 
     st.markdown("---")
 
-    # ── 7개 탭 ───────────────────────────────────────────────────────────────
-    tab1, tab2, tab3, tab4, tab5, tab6, tab7 = st.tabs([
+    # ── 8개 탭 ───────────────────────────────────────────────────────────────
+    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8 = st.tabs([
         t('tab_map', lang), t('tab_list', lang), t('tab_detail', lang),
         t('tab_model', lang), t('tab_spatial', lang), t('tab_trend', lang),
-        t('tab_forecast', lang),
+        t('tab_forecast', lang), t('tab_method', lang),
     ])
 
     # ── TAB 1: 위험도 지도 ────────────────────────────────────────────────────
@@ -994,8 +1282,8 @@ def main():
 
         top50 = df_view.nlargest(50, risk_col)['pole_id'].tolist()
         fac_sel_lbl = "Select Facility (Top-50 High Risk)" if lang == 'en' else "설비 선택 (Top-50 고위험)"
-        fac_fmt = (lambda x: f"Facility #{x}") if lang == 'en' else (lambda x: f"설비 #{x}")
-        sel_pole = st.selectbox(fac_sel_lbl, top50, format_func=fac_fmt)
+        top50_labels = {pid: (f"Facility #{pid}" if lang == 'en' else f"설비 #{pid}") for pid in top50}
+        sel_pole = st.selectbox(fac_sel_lbl, top50, format_func=lambda x: top50_labels.get(x, str(x)))
 
         row = df_view[df_view['pole_id'] == sel_pole]
         if not len(row):
@@ -1130,25 +1418,34 @@ def main():
                 abl = perf['ablation']
                 fig, ax = plt.subplots(figsize=(6, 4))
                 colors_abl = ['#aec7e8','#6baed6','#3182bd','#08519c']
-                bars = ax.bar(range(len(abl)), abl['top5_overlap_pct'], color=colors_abl, alpha=0.85)
-                threshold_lbl = '80% baseline' if lang == 'en' else '80% 기준'
-                ax.axhline(80, color='red', ls='--', lw=1.5, label=threshold_lbl)
+                bars = ax.bar(range(len(abl)), abl['auc'], color=colors_abl, alpha=0.85)
+                ax.axhline(0.5, color='gray', ls='--', lw=1, alpha=0.6,
+                           label='Random (0.5)' if lang == 'en' else '랜덤 기준선 (0.5)')
                 ax.set_xticks(range(len(abl)))
                 ax.set_xticklabels([m.replace('_',' ') for m in abl['model']], rotation=15, ha='right', fontsize=9)
                 if lang == 'en':
-                    ax.set_ylabel('Top-5% Overlap Rate (%)')
-                    ax.set_title('Prediction Stability by Feature Layer', fontweight='bold')
+                    ax.set_ylabel('AUC'); ax.set_title('AUC by Feature Group (Ablation)', fontweight='bold')
                 else:
-                    ax.set_ylabel('Top5% 일치율 (%)')
-                    ax.set_title('요소 추가에 따른 예측 안정성', fontweight='bold')
-                for b, v in zip(bars, abl['top5_overlap_pct']):
-                    ax.text(b.get_x()+b.get_width()/2, v+1, f'{v:.0f}%', ha='center', fontsize=9)
-                ax.legend(); ax.set_ylim(0, 115)
+                    ax.set_ylabel('AUC'); ax.set_title('Feature 그룹 추가에 따른 AUC 향상', fontweight='bold')
+                for b, v in zip(bars, abl['auc']):
+                    ax.text(b.get_x()+b.get_width()/2, v+0.005, f'{v:.3f}', ha='center', fontsize=9)
+                ax.legend(); ax.set_ylim(0.4, 1.05)
                 plt.tight_layout(); st.pyplot(fig); plt.close()
                 if lang == 'en':
-                    st.info("💡 Adding spatial, facility, and history features significantly improves Top-5% identification accuracy over weather-only.")
+                    st.info("💡 Weather features alone yield AUC 0.66. Adding spatial and facility features progressively improves to 0.96.")
                 else:
-                    st.info("💡 기상 정보만 사용할 때보다 공간·설비·이력 정보를 추가할수록\nTop-5% 위험 설비 식별 정확도가 크게 향상됩니다.")
+                    st.info("💡 기상 단독 AUC 0.66 → 공간+설비 추가 시 0.96으로 향상. 각 레이어가 독립적으로 기여합니다.")
+
+        # 모델 개선 여정 (A→B→C)
+        fig_comp = OUT_FIGURES / 'fig_model_comparison.png'
+        if fig_comp.exists():
+            if lang == 'en':
+                st.markdown("**📈 Model Improvement Journey: A → B → C**")
+                st.caption("A: Original (fire history included) | B: Fire history removed | C: +FWI+Accumulated risk+Cascade")
+            else:
+                st.markdown("**📈 모델 개선 단계: A → B → C**")
+                st.caption("A: 기존(화재이력 포함) | B: 화재이력 제거 | C: +FWI+누적위험+연쇄피해")
+            st.image(str(fig_comp), use_container_width=True)
 
         if 'shap_imp' in perf:
             if lang == 'en':
@@ -1258,16 +1555,22 @@ def main():
             else:
                 st.info(f"💡 전체 설비의 **{vh_pct:.1f}%({vh_cnt_p:,}개)**가 즉각 점검 대상입니다.")
 
+        col_a, col_b = st.columns(2)
+        with col_a:
+            img_path = OUT_FIGURES / 'fig4_risk_map_scatter.png'
+            if img_path.exists():
+                cap = "ML probability-based spatial distribution" if lang == 'en' else "ML 확률 기반 공간 분포 (샘플 50K)"
+                st.image(str(img_path), use_container_width=True, caption=cap)
+        with col_b:
+            img_path = OUT_FIGURES / 'fig_region_cv.png'
+            if img_path.exists():
+                cap = "Region cross-validation AUC by station" if lang == 'en' else "관측소별 Region CV AUC"
+                st.image(str(img_path), use_container_width=True, caption=cap)
+
         img_path = OUT_FIGURES / 'fig4_risk_map.png'
         if img_path.exists():
-            if lang == 'en':
-                st.markdown("**Gangwon Province Power Pole Fire Risk Spatial Distribution**")
-                st.image(str(img_path), use_container_width=True,
-                         caption="Red = Top 5% high-risk facilities (Gangwon Province)")
-            else:
-                st.markdown("**강원도 전봇대 화재위험도 공간 분포**")
-                st.image(str(img_path), use_container_width=True,
-                         caption="붉은색 = 상위 5% 고위험 설비 (강원도 전역)")
+            cap = "ML score distribution + grade pie chart" if lang == 'en' else "ML 위험 확률 분포 + 등급 파이차트"
+            st.image(str(img_path), use_container_width=True, caption=cap)
 
     # ── TAB 6: 트렌드 분석 ───────────────────────────────────────────────────
     with tab6:
@@ -1421,6 +1724,17 @@ def main():
                 ax.set_title(hm_t, fontweight='bold')
                 plt.tight_layout(); st.pyplot(fig); plt.close()
 
+        # FWI 계절 그림 추가
+        img_fwi = OUT_FIGURES / 'fig_fwi_seasonal.png'
+        if img_fwi.exists():
+            if lang == 'en':
+                st.markdown("**🔥 FWI (Fire Weather Index) Seasonal Pattern**")
+                st.caption("Canadian FWI + Accumulated Risk Index by month — Spring peak matches actual wildfire season")
+            else:
+                st.markdown("**🔥 FWI (산불위험지수) 계절 패턴**")
+                st.caption("캐나다 산불위험지수 + 누적위험지수 월별 추이 — 봄철(3~5월) 피크가 실제 산불 발생 시기와 일치")
+            st.image(str(img_fwi), use_container_width=True)
+
     # ── TAB 7: 기상 예보 ─────────────────────────────────────────────────────
     with tab7:
         st.markdown("##### 📡 기상 예보 기반 화재 위험 예보 (3일)")
@@ -1532,7 +1846,8 @@ def main():
                 st.markdown("---")
                 st.markdown(t('fc_detail', lang))
                 sel_idx  = st.radio(t('fc_date', lang), range(len(dates)),
-                                    format_func=lambda i: date_labels[i], horizontal=True)
+                                    format_func=lambda i: date_labels[i] if i < len(date_labels) else str(i),
+                                    horizontal=True)
                 sel_date = dates[sel_idx]
                 fc_day   = fc_result[fc_result['fcst_date'] == sel_date]
                 feat_day = fc_feat[fc_feat['fcst_date'] == sel_date] if fc_feat is not None else pd.DataFrame()
@@ -1655,6 +1970,207 @@ def main():
                 err_msg = "Forecast result is empty. Check API key or network." if lang == 'en' \
                           else "예보 결과가 비어 있습니다. API 키 또는 네트워크를 확인하세요."
                 st.error(err_msg)
+
+    # ── TAB 8: 산출 방식 ─────────────────────────────────────────────────────
+    with tab8:
+        st.markdown("##### 🧮 WPFI 위험도 산출 방식" if lang == 'ko' else "##### 🧮 WPFI Calculation Methodology")
+
+        # ── 섹션 1: 전체 파이프라인 ─────────────────────────────────────────
+        with st.expander("① 전체 파이프라인" if lang == 'ko' else "① Full Pipeline", expanded=True):
+            if lang == 'ko':
+                st.markdown("**데이터 → Feature → 모델 → 위험도 산출 흐름**")
+            else:
+                st.markdown("**Data → Feature → Model → Risk Score Pipeline**")
+            st.code(
+                "KMA ASOS 기상일자료 (11개 관측소)\n"
+                "        ↓ FWI 계산 / Rolling Window / 특보 Flag\n"
+                "   기상 Feature (18개)\n"
+                "        ↓\n"
+                "ESA WorldCover + DEM  →  산림·지형 Feature (4개)\n"
+                "설비 위치 데이터       →  설비 밀도·연쇄피해 Feature (4개)\n"
+                "산불 발생 이력         →  label 생성 (산불 ±14일 + 500m 이내)\n"
+                "        ↓\n"
+                "   LightGBM 학습 (39개 feature, AUC 0.9574)\n"
+                "        ↓\n"
+                "   ML 화재확률 x Rule-based WPFI 통합 점수\n"
+                "        ↓\n"
+                "   등급 분류 (Very High / High / Moderate / Low)",
+                language=None
+            )
+
+        # ── 섹션 2: 4-Component WPFI ────────────────────────────────────────
+        with st.expander("② 4-Component WPFI 가중합 공식" if lang == 'ko' else "② 4-Component WPFI Formula"):
+            if lang == 'ko':
+                st.markdown(r"""
+**WPFI 종합점수 = 기상(35%) + 공간(30%) + 설비(25%) + 이력(10%)**
+
+| 구성요소 | 가중치 | 주요 변수 |
+|----------|--------|----------|
+| 기상 위험 (Weather Hazard) | **35%** | FWI, 건조도, 풍속, 누적위험지수, 실효습도 |
+| 공간 노출 (Spatial Exposure) | **30%** | 고도, 지형노출도, 산림 인접 여부 |
+| 설비 노출 (Facility Exposure) | **25%** | 설비 밀도, 연쇄피해 위험 (cascade_risk) |
+| 화재 이력 (Historical Prior) | **10%** | 과거 산불 발생 건수 |
+""")
+            else:
+                st.markdown(r"""
+**WPFI Score = Weather(35%) + Spatial(30%) + Facility(25%) + History(10%)**
+
+| Component | Weight | Key Variables |
+|-----------|--------|--------------|
+| Weather Hazard | **35%** | FWI, dryness, wind, accumulated risk, eff. humidity |
+| Spatial Exposure | **30%** | elevation, terrain exposure, forest proximity |
+| Facility Exposure | **25%** | facility density, cascade risk |
+| Historical Prior | **10%** | past wildfire count |
+""")
+
+        # ── 섹션 3: FWI 캐나다 국제표준 ────────────────────────────────────
+        with st.expander("③ FWI (산불위험지수) — 캐나다 국제 표준" if lang == 'ko' else "③ FWI — Canadian International Standard"):
+            if lang == 'ko':
+                st.markdown("**캐나다 산불위험지수 (Canadian Fire Weather Index System)**")
+                st.info("기상청, 산림청, 국제산불연구기관이 공식 채택한 전 세계 표준 산불위험 지수입니다.")
+                st.markdown("**Stage 1: 연료 수분 코드 (Fuel Moisture Codes)**")
+                st.dataframe(
+                    __import__('pandas').DataFrame({
+                        "코드": ["FFMC", "DMC", "DC"],
+                        "이름": ["Fine Fuel Moisture Code", "Duff Moisture Code", "Drought Code"],
+                        "입력 변수": ["기온·상대습도·풍속·강수", "기온·상대습도·강수 (14일 누적)", "기온·강수 (30일 누적)"],
+                        "의미": ["낙엽·건초 등 세연료 수분", "반분해 유기물층 수분", "깊은 토양 건조도"],
+                    }), hide_index=True, use_container_width=True
+                )
+                st.markdown("**Stage 2: 화재 행동 지수**")
+                col_a, col_b = st.columns(2)
+                with col_a:
+                    st.markdown("**ISI (Initial Spread Index)**  \n초기 화재 확산 속도")
+                    st.latex(r"ISI = 0.208 \times e^{0.05039 W} \times f(FFMC)")
+                with col_b:
+                    st.markdown("**BUI (Buildup Index)**  \n연료 누적 건조량")
+                    st.latex(r"BUI = 0.8 \times \frac{DMC \times DC}{DMC + 0.4 \times DC}")
+                st.markdown("**Stage 3: 최종 FWI**")
+                st.latex(r"FWI = f(ISI,\; BUI)")
+                st.dataframe(
+                    __import__('pandas').DataFrame({
+                        "FWI 값": ["0 ~ 11", "12 ~ 22", "23 ~ 37", "38 이상"],
+                        "위험 등급": ["낮음 (Low)", "보통 (Moderate)", "높음 (High)", "매우 높음 (Very High)"],
+                        "현장 조치": ["정기 모니터링", "주의 강화", "중점 점검", "즉각 대응"],
+                    }), hide_index=True, use_container_width=True
+                )
+                st.markdown("**본 프로젝트 적용 결과:**")
+                st.markdown("- 강원도 11개 KMA ASOS 관측소 일별 기온·상대습도·풍속·강수량으로 FWI 산출")
+                st.markdown("- FWI 최고 기록: **대관령 2022년 3월 5일 29.1점** (봄철 고위험)")
+                st.markdown("- FWI + 누적위험지수(14일 지수 감쇠) → LightGBM feature로 활용")
+            else:
+                st.markdown("**Canadian FWI System — Global Standard adopted by weather and forestry agencies worldwide**")
+                st.markdown("**Stage 1:** FFMC (fine fuel) → DMC (duff, 14-day) → DC (drought, 30-day)")
+                st.markdown("**Stage 2:** ISI = spread speed | BUI = fuel buildup")
+                st.latex(r"ISI = 0.208 \times e^{0.05039 W} \times f(FFMC)")
+                st.latex(r"BUI = 0.8 \times \frac{DMC \times DC}{DMC + 0.4 \times DC}")
+                st.markdown("**Stage 3:** FWI = f(ISI, BUI)")
+                st.dataframe(
+                    __import__('pandas').DataFrame({
+                        "FWI": ["0–11","12–22","23–37","38+"],
+                        "Risk": ["Low","Moderate","High","Very High"],
+                    }), hide_index=True, use_container_width=True
+                )
+            img_fwi = OUT_FIGURES / 'fig_fwi_seasonal.png'
+            if img_fwi.exists():
+                cap = "Monthly FWI + Accumulated Risk — Spring peak matches actual wildfire season" if lang == 'en' \
+                      else "FWI + 누적위험지수 월별 패턴 — 봄철(3~5월) 피크가 실제 산불 발생 시기와 일치"
+                st.image(str(img_fwi), use_container_width=True, caption=cap)
+
+        # ── 섹션 4: label 설계 ──────────────────────────────────────────────
+        with st.expander("④ Label 설계 — 날짜+공간 기반" if lang == 'ko' else "④ Label Design — Temporal + Spatial"):
+            if lang == 'ko':
+                st.markdown("""
+**기존 방식의 문제**
+- 화재 발생 지점 인근 전봇대 = 모든 날짜 label=1 → 날씨와 무관한 지리적 학습
+- 결과: AUC 0.9982 (과적합), 날씨 feature 기여도 ~14%
+
+**개선된 label 설계**
+```
+label = 1  ←→  산불 발생일 기준 ±14일 이내 AND 반경 500m 이내 전봇대
+label = 0  ←→  위 조건 외 모든 (전봇대, 날짜) 조합
+```
+
+| 지표 | 기존 | 개선 |
+|------|------|------|
+| label=1 비율 | 9.1% (278,636건) | **1.9% (57,036건)** |
+| 날씨 기여도 | ~14% | **34%** |
+| AUC | 0.9982 (의심) | **0.9574 (신뢰)** |
+| 계절성 | 여름도 label=1 | 봄·겨울 집중 (실제 산불 패턴) |
+
+**검증:** label=1인 날의 `precip_sum_7d` 평균이 label=0보다 67% 낮음 → 모델이 실제 건조 조건을 학습
+""")
+            else:
+                st.markdown("""
+**Improved Label Design**
+```
+label=1  ←  wildfire within ±14 days AND 500m radius
+label=0  ←  all other (pole, date) pairs
+```
+Result: AUC improved to 0.9574, weather contribution up to 34%, correct seasonality (spring peak).
+""")
+
+        # ── 섹션 5: 연쇄피해 위험 ───────────────────────────────────────────
+        with st.expander("⑤ 연쇄피해 위험 (Cascade Risk) — 공간 네트워크 분석" if lang == 'ko' else "⑤ Cascade Risk — Spatial Network Analysis"):
+            if lang == 'ko':
+                st.markdown("""
+**계산 방법**
+1. 전봇대 위치(1,387,831개)로 BallTree 공간 인덱스 구축
+2. 각 전봇대 기준 **300m 이내 인접 전봇대 수** 계산
+3. 0~100 정규화 → `cascade_risk` feature
+
+```python
+# 핵심 코드
+from sklearn.neighbors import BallTree
+tree = BallTree(coords_rad, metric='haversine')
+counts_300m = tree.query_radius(coords_rad, r=300/6371000, count_only=True)
+cascade_risk = MinMaxScaler(0,100).fit_transform(counts_300m)
+```
+
+**의미:** cascade_risk가 높은 설비 = 화재 발생 시 인근 전봇대로 불이 옮겨 붙어 연쇄 정전 위험이 큰 구간
+
+| 수치 | 의미 |
+|------|------|
+| 0~30 | 산간 독립 설비, 연쇄 피해 낮음 |
+| 30~60 | 도심 인접 구간, 주의 필요 |
+| 60~100 | 설비 밀집 구간, 화재 시 대규모 피해 |
+""")
+
+        # ── 섹션 6: RAG 시스템 ──────────────────────────────────────────────
+        with st.expander("⑥ RAG 기반 AI 설명 시스템" if lang == 'ko' else "⑥ RAG-based AI Explanation System"):
+            if lang == 'ko':
+                st.markdown("""
+**RAG (Retrieval-Augmented Generation)**
+
+> 단순 GPT 응답이 아닌, **실제 데이터에 근거한 설명**을 생성합니다.
+
+```
+설비 선택
+    ↓
+기상 조건(FWI, 누적위험도, 건조도) → 쿼리 생성
+    ↓
+TF-IDF 코퍼스 검색 (106개 문서)
+    ├─ 산불 사례: 강원도 174건 (산림청 2022-2024)
+    ├─ 기상특보 기준: 기상청 공식 건조·강풍 특보 임계값
+    └─ 도메인 지식: FWI 해석, 전력설비 화재 원인, 연쇄피해
+    ↓
+GPT-4o-mini 프롬프트에 검색 결과 주입
+    ↓
+근거 있는 설명 생성
+    예: "FWI 29.1 → 건조경보 수준, 2022년 3월 대관령 유사 조건
+        에서 실제 산불 발생. 연쇄피해 위험 높은 구간으로 즉각 점검 필요"
+```
+
+**향후 확장 (Future Work):** Knowledge Graph 기반 전력망 위상 분석, 풍향 데이터 연동 화재 전파 경로 예측
+""")
+            else:
+                st.markdown("""
+**RAG (Retrieval-Augmented Generation)**
+
+Searches 106 documents (wildfire cases + weather warning standards + domain knowledge) and injects context into GPT-4o-mini prompt for evidence-based explanations.
+
+**Future Work:** Knowledge Graph for power network topology, wind direction-based fire propagation path prediction.
+""")
 
     # ── 푸터 ─────────────────────────────────────────────────────────────────
     st.markdown(f"""
