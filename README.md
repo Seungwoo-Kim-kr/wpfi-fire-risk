@@ -1,161 +1,220 @@
 # 🔥 WPFI — Power Facility Fire Risk Prioritization System
 
-> **Explainable GeoAI model for identifying and prioritizing wildfire-prone power infrastructure**  
+> **Explainable GeoAI model for identifying and prioritizing wildfire-prone power infrastructure**
 > Built for the **2026 KMA Weather Big Data Contest** — Topic 1: Weather-Based Fire Risk Analysis of Power Facilities
 
 [![Python](https://img.shields.io/badge/Python-3.12-blue?logo=python)](https://www.python.org/)
 [![Streamlit](https://img.shields.io/badge/Streamlit-1.58-FF4B4B?logo=streamlit)](https://streamlit.io/)
-[![LightGBM](https://img.shields.io/badge/LightGBM-AUC%200.9574-brightgreen)](https://lightgbm.readthedocs.io/)
+[![LightGBM](https://img.shields.io/badge/LightGBM-AUC%200.737%2F0.806-brightgreen)](https://lightgbm.readthedocs.io/)
+[![Weather](https://img.shields.io/badge/Weather%20Contribution-94.7%25-blue)](https://github.com/Seungwoo-Kim-kr/wpfi-fire-risk)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
 ---
 
-## 📋 Overview
+## Overview
 
-WPFI (**W**eather-Spatial **P**ower **F**acility Fire-risk **I**ndex) integrates meteorological data, Canadian FWI fire weather indices, spatial information (forest cover, terrain), power facility attributes, and historical fire records to compute a composite risk score for each power pole — enabling prioritized field inspection.
+**WPFI\_v2** (Weather-driven Power Facility Fire-risk Index v2) integrates KMA ASOS meteorological data, Canadian FWI fire weather indices, and fire department electrical fire records to compute a **multi-hazard composite risk score** for each power pole — enabling weather-driven prioritized field inspection.
 
-**Coverage:** 1,387,831 power poles in Gangwon Province, South Korea  
-**Analysis period:** 2022–2024 (3 years of daily data)  
-**Model AUC:** 0.9574 (LightGBM Model C — FWI + Accumulated Risk + Cascade)  
-**Recall@Top10%:** 82.8% — inspecting top 10% captures 83% of actual fire-risk events
+| Attribute | Value |
+|-----------|-------|
+| Coverage | 1,387,831 power poles — Gangwon Province, South Korea |
+| Analysis period | 2022–2024 (3 years of daily observations) |
+| Formula | `WPFI_v2 = 0.5 × P_dry + 0.3 × P_heat + 0.2 × P_light` |
+| Dry model AUC | **0.737** |
+| Heat model AUC | **0.806** |
+| Weather contribution | **94.7–94.8%** (Top-5 features all weather; zero calendar dependency) |
 
 ---
 
-## ✨ Key Features
+## Key Features
 
 | Feature | Description |
 |---------|-------------|
-| 🗺️ **Interactive Risk Map** | Folium map with ML probability-based 4-tier risk grades for 1.38M facilities |
-| 📋 **Priority Inspection List** | Top-K% facilities sorted by combined ML+WPFI score with CSV export |
-| 🔍 **Facility Detail + RAG AI** | SHAP waterfall + RAG-enhanced GPT-4o-mini explanation (wildfire cases + KMA standards) |
-| 📊 **Model Performance** | AUC, Recall@K, Ablation (A→B→C journey), Region CV (9 stations) |
-| 📈 **Spatial Distribution** | Station-level risk heatmap + scatter map + Region CV chart |
-| 📅 **Trend Analysis** | Weather hazard trends + FWI seasonal pattern (spring peak visualization) |
-| 📡 **3-Day Weather Forecast** | KMA short-term API → LightGBM inference → fire risk prediction |
-| 🧮 **Methodology** | FWI formula (FFMC/DMC/DC/ISI/BUI), label design, cascade risk, RAG system |
-| 🌦️ **What-if Simulation** | 6 scenario presets with real-time grade recalculation |
+| 🗺️ **Interactive Risk Map** | Folium map with WPFI\_v2-based 4-tier risk grades for 1.38M facilities |
+| 📋 **Priority Inspection List** | Top-K% facilities sorted by WPFI\_v2 score with CSV export |
+| 🔍 **Facility Detail + RAG AI** | SHAP waterfall + RAG-enhanced GPT-4o-mini explanation |
+| 📊 **Model Performance** | AUC, Recall@K, weather contribution %, zero calendar dependency |
+| 🌦️ **Multi-Hazard Weather Simulator** | 8 weather conditions (rain/storm/heatwave/tropical night/drought...) + direct sliders |
+| 📅 **Trend Analysis** | Weather hazard trends + FWI seasonal pattern |
+| 📡 **3-Day Forecast** | KMA API → LightGBM inference → fire risk prediction |
+| 🧮 **Methodology** | FWI formula, WPFI\_v2 label design, cascade risk, RAG system |
 | 🌐 **Bilingual** | Korean / English toggle |
 
 ---
 
-## 🆕 v3.1 Improvements (2026-06)
+## What's New — v4.0 (2026-06)
 
-### 🤖 Model C — Physics-based Fire Risk
+### Multi-Hazard 3-Component Model
 
-**Label redesign (core contribution):**
+**WPFI\_v2 = 0.5 × P\_dry + 0.3 × P\_heat + 0.2 × P\_light**
 
-| | Old (Geographic) | New (Temporal + Spatial) |
-|-|-----------------|--------------------------|
-| label=1 condition | Near any historical fire = ALL dates | Within ±14 days of wildfire + 500m radius |
-| label=1 ratio | 9.1% (278,636 rows) | 1.9% (57,036 rows) |
-| Weather dependency | None | Yes — dry/windy days concentrated |
-| AUC | 0.9982 (overfitting suspected) | **0.9574** (reliable) |
-| Weather SHAP contribution | ~14% | **33%** |
+| Component | Weight | Method | AUC | Weather Contribution |
+|-----------|--------|--------|-----|---------------------|
+| P\_dry (Dryness) | 50% | LightGBM | **0.737** | **94.8%** |
+| P\_heat (Heat) | 30% | LightGBM | **0.806** | **94.7%** |
+| P\_light (Lightning) | 20% | Rule-based | — | 100% |
 
-**4 new features added:**
+### Weather-Condition Label Design
 
-| Feature | Description |
-|---------|-------------|
-| `fwi_score / fwi_bui / fwi_isi` | Canadian FWI — physically-based fire danger |
-| `accumulated_risk_norm` | 14-day exponential decay accumulated risk |
-| `cascade_risk` | 300m BallTree network → cascade failure risk |
-| `terrain_fire_risk` | Forest(40%) + elevation(30%) + land cover(30%) |
+Instead of cause-code classification from fire department records (poor geocoding precision), labels are defined by **actual weather conditions on fire occurrence dates**.
 
-### 📐 Canadian FWI System
+| | v3.1 (Single Model) | **v4.0 (Multi-Hazard)** |
+|-|---------------------|------------------------|
+| Label basis | Wildfire proximity | **Weather condition on fire date** |
+| Threshold | — | Dry: P75 (dry\_streak≥5, fwi≥2.7) / Heat: temp≥27.2°C |
+| Time window | 7 days | **3 days** (higher signal density) |
+| Positive rate | 1.87% | dry 3.15% / heat 8.41% |
+| Weather contribution | 33% | **94.7–94.8%** |
+| Calendar dependency | month/season included | **0%** (fully removed) |
 
-International standard adopted by KMA and forestry agencies worldwide:
+### Weather Signal Separation
 
-| Code | Name | Inputs | Meaning |
-|------|------|--------|---------|
-| FFMC | Fine Fuel Moisture Code | Temp, RH, Wind, Precip | Fine fuel moisture |
-| DMC | Duff Moisture Code | Temp, RH, Precip (14-day) | Duff layer moisture |
-| DC | Drought Code | Temp, Precip (30-day) | Deep soil dryness |
-| ISI | Initial Spread Index | Wind + FFMC | Fire spread speed |
-| BUI | Buildup Index | DMC + DC | Fuel accumulation |
-| FWI | Fire Weather Index | ISI + BUI | Final fire danger |
+| Feature | Dry model (label=1 vs 0) | Heat model (label=1 vs 0) |
+|---------|--------------------------|---------------------------|
+| fwi\_score | **+118.9%** ✅ | −21.4% |
+| dryness\_score | +47.8% ✅ | −26.9% ✅ |
+| heat\_score | −10.5% ✅ | **+70.7%** ✅ |
+| eff\_humidity | −23.6% ✅ | +7.5% |
+| wind\_score | +39.8% | −16.5% ✅ |
 
-Peak recorded: Daegwallyeong station, 2022-03-05 → **FWI 29.1** (Very High)
+Both models learn perfectly **opposite** weather patterns — physically sound.
 
-### ⚡ Risk Grade Redesign
+### Seasonal Pattern Validation
 
-ML probability absolute-value thresholds (not arbitrary percentile slicing):
+| Season | Dry model positive rate | Heat model positive rate |
+|--------|------------------------|--------------------------|
+| Spring | 4.0% | 3.4% |
+| **Summer** | 1.9% | **27.7%** |
+| Autumn | 1.5% | 4.7% |
+| **Winter** | **5.2%** | **0.0%** |
 
-| Grade | ML Probability | Count | Meaning |
-|-------|--------------|-------|---------|
-| 🔴 Very High | ≥ 0.20 | 5,635 (0.41%) | Actual wildfire conditions |
-| 🟠 High | 0.05 ~ 0.20 | 7,847 (0.57%) | Elevated weather risk |
-| 🟡 Moderate | 0.01 ~ 0.05 | 20,422 (1.47%) | Above-average caution |
-| 🟢 Low | < 0.01 | 1,353,927 (97.56%) | Normal range |
+> Dry model peaks in winter/spring (dry season). Heat model peaks in summer (heatwave season). Physically validated.
 
-### 🔮 RAG-Enhanced AI Explanations
+### Lightning Rule v2 — P\_light
 
-```
-Facility selected
-    → FWI / accumulated_risk / cascade_risk → query string
-    → TF-IDF search over 106 documents
-        ├── 100 wildfire cases (Gangwon, Korea Forest Service 2022-2024)
-        ├── KMA weather warning standards (dry/wind alert thresholds)
-        └── Domain knowledge (FWI interpretation, cascade failure, etc.)
-    → Retrieved context injected into GPT-4o-mini prompt
-    → Evidence-based, grade-differentiated explanation
+```python
+# Before: P_light = elevation / 1033  (correlation 1.0000 — elevation copy)
+# v4.0: weather signal added
+P_light = 0.50 × elevation_norm
+        + 0.30 × (summer_temp_range / max)   # temp amplitude → atmospheric instability
+        + 0.20 × (summer_rh / max)            # summer humidity
+# Result: correlation 1.0000 → 0.9818 (weather signal enters)
 ```
 
-### 🎨 UI Overhaul
+### Improved Weather Simulator
 
-- **Dark theme** via `.streamlit/config.toml`
-- **Glassmorphism KPI cards** — Very High / High / Low counts + AUC + Recall@Top10%
-- **Hero header** — gradient background + badge tags
-- **Sidebar** — WPFI logo branding + progress bar risk breakdown + model status card
-- **8 tabs** (was 7) — 🧮 산출방식 / Methodology tab added with FWI formulas (`st.latex`)
+8 weather condition types with direct parameter sliders:
+- **Weather types**: ☀️ Clear / 🌧 Rain / 🌦 Heavy Rain / ⛈ Thunderstorm / 🌡 Heatwave / 🌙 Tropical Night / 🏜 Extreme Drought / 🌬 Strong Wind
+- **Direct sliders**: Temperature (±15°C), Humidity (±40%), Precipitation (mm/day), FWI multiplier (×0.1–5.0)
+- **Real-time preview**: P\_dry / P\_heat / P\_light component change (%) displayed live
+
+### Structured AI Summaries
+
+```python
+# Before: free-form text
+st.info("Gangwon Province analysis shows 69,174 (5.0%) Very High risk...")
+
+# v4.0: response_format=json_object enforced
+{
+  "headline": "Very High 69,174 (5.0%) — Wonju area highest risk",
+  "situation": "1,387,831 facilities analyzed...",
+  "risk_factor": "Dry/FWI conditions, high-altitude lightning exposure",
+  "action": "Immediate inspection for Very High; pre-check insulation in dry-alert zones"
+}
+```
+
+### Risk Grade Distribution (v4.0)
+
+| Grade | Threshold | Count | Ratio |
+|-------|-----------|-------|-------|
+| 🔴 Very High | WPFI\_v2 ≥ 36.9 | 69,174 | 5.0% |
+| 🟠 High | 30.2 ~ 36.9 | 139,025 | 10.0% |
+| 🟡 Moderate | 16.9 ~ 30.2 | 345,391 | 24.9% |
+| 🟢 Low | < 16.9 | 834,241 | 60.1% |
 
 ---
 
-## 🏗️ Architecture
+## Architecture (v4.0)
 
 ```
-KMA ASOS Daily Weather (11 stations, 2022-2024)
+KMA ASOS Daily Weather (11 stations, Gangwon 2022–2024)
         │
         ▼  FWI calculation / Rolling window / Alert flags
-   Weather Features (18)   ←── Canadian FWI (FFMC/DMC/DC/ISI/BUI)
-        │                       Accumulated risk (14-day decay)
+   Weather Features (34)   ←── Canadian FWI (FFMC/DMC/DC/ISI/BUI)
+        │                       Accumulated risk / Dryness / Heat scores
+        │                       Calendar features REMOVED (month, season)
         │
-ESA WorldCover + Copernicus DEM  → Spatial Features (4)
-Power Facility Locations          → Facility Features (4)
-                                       cascade_risk (300m BallTree)
-Wildfire records (KFS 2022-2024)  → Temporal+Spatial Label
-   (±14 days + 500m radius)
+ESA WorldCover + Copernicus DEM  → Spatial Features
+Power Facility Locations          → Facility Features (cascade_risk 300m BallTree)
         │
-        ▼
-┌─────────────────────────────────────────────────────────┐
-│            LightGBM Model C (39 features)               │
-│  AUC 0.9574 | Recall@Top10% 82.8%                      │
-│  Weather+FWI SHAP: 33% | Region CV avg: 0.977           │
-└─────────────────────────────────────────────────────────┘
-        │
-        ▼  ML probability × Rule-based WPFI (60:40 blend)
-┌─────────────────────────────────────────────────────────┐
-│           Combined Risk Score (0-100) + Grade           │
-└─────────────────────────────────────────────────────────┘
+NFDS Electrical Fire Records 1,758 cases (Gangwon 2022–2024)
+        ▼  Weather-condition classification (P75 threshold + 3-day window)
+   label_dry  (3.15%): dry_streak≥5 AND fwi≥2.7
+   label_heat (8.41%): temp_max≥27.2°C
         │
         ▼
 ┌─────────────────────────────────────────────────────────┐
-│             Streamlit Dashboard v3.1                     │
-│  8 tabs · Dark theme · Glassmorphism KPI · RAG AI       │
+│   Model_dry  (LightGBM) — AUC 0.737, Weather 94.8%     │
+│   Model_heat (LightGBM) — AUC 0.806, Weather 94.7%     │
+│   Rule_light (elevation + summer instability + humidity) │
+└─────────────────────────────────────────────────────────┘
+        │
+        ▼  WPFI_v2 = 0.5×P_dry + 0.3×P_heat + 0.2×P_light
+┌─────────────────────────────────────────────────────────┐
+│      hazard_combined (0–1) → final_risk_wpfi (0–100)    │
+│      Grade: VH≥36.9 / High≥30.2 / Moderate≥16.9       │
+└─────────────────────────────────────────────────────────┘
+        │
+        ▼
+┌─────────────────────────────────────────────────────────┐
+│             Streamlit Dashboard v4.0                     │
+│  8 tabs · WPFI_v2 Simulator · JSON AI Summaries         │
 └─────────────────────────────────────────────────────────┘
 ```
 
-### Risk Score Components
+### WPFI\_v2 Components
 
-| Layer | Weight | Key Variables |
-|-------|--------|---------------|
-| Weather Hazard | **35%** | FWI, dryness score, wind score, accumulated risk, effective humidity |
-| Spatial Exposure | **30%** | Elevation, terrain fire exposure, forest proximity |
-| Facility Exposure | **25%** | Facility density, cascade risk (300m BallTree network) |
-| Historical Prior | **10%** | Past wildfire count (Korea Forest Service) |
+| Component | Weight | Method | Top Features | Weather % |
+|-----------|--------|--------|-------------|-----------|
+| P\_dry | 50% | LightGBM | fwi\_dry\_streak (33%), fwi\_isi (7%), eff\_humidity (7%) | **94.8%** |
+| P\_heat | 30% | LightGBM | heat\_score (53%), accumulated\_risk (5%), temp\_max (4%) | **94.7%** |
+| P\_light | 20% | Rule-based | elevation (50%), summer temp range (30%), summer humidity (20%) | 100% |
 
 ---
 
-## 🚀 Quick Start
+## Model Performance
+
+### WPFI\_v2 Multi-Hazard
+
+| Model | AUC | Recall@Top10% | Weather Contribution | Calendar Dependency |
+|-------|-----|--------------|---------------------|---------------------|
+| P\_dry (Dryness) | **0.737** | 0.320 | **94.8%** | **0%** |
+| P\_heat (Heat) | **0.806** | 0.285 | **94.7%** | **0%** |
+
+### Improvement Journey
+
+| Version | Model | AUC | Weather |
+|---------|-------|-----|---------|
+| v1 (Geographic label) | Single LightGBM | 0.998 | 14% (overfitting) |
+| v3.1 (Temporal label) | Single LightGBM | 0.957 | 33% |
+| **v4.0 (Multi-Hazard)** | P\_dry + P\_heat + P\_light | **0.737/0.806** | **94.7–94.8%** |
+
+> The AUC drop from v3.1 to v4.0 is expected: prior models were dominated by spatial features (facility\_density).
+> v4.0 achieves **genuine weather-driven prediction**, directly aligned with the Weather Big Data Contest objective.
+
+### Regional Risk Profiles (Top-5)
+
+| Municipality | WPFI\_v2 | P\_dry | P\_heat | P\_light |
+|-------------|---------|-------|--------|---------|
+| Wonju | 0.343 | 0.462 | 0.053 | 0.479 |
+| Taebaek | 0.327 | 0.316 | 0.007 | 0.834 |
+| Inje | 0.222 | 0.078 | 0.108 | 0.753 |
+| Samcheok | 0.219 | 0.184 | 0.006 | 0.629 |
+| Hoengseong | 0.214 | 0.120 | 0.124 | 0.584 |
+
+---
+
+## Quick Start
 
 ### Prerequisites
 - Python 3.12+
@@ -193,18 +252,26 @@ python -m streamlit run app.py
 
 Open [http://localhost:8501](http://localhost:8501).
 
-> **Note:** Processed data files (`data/processed/`) are required. To reproduce from scratch, run notebooks 01–09 in order after obtaining contest data from [날씨마루](https://bd.kma.go.kr). To regenerate labels only: `python regen_labels.py`
+> **Note:** Processed data files (`data/processed/`) are required.
+> To reproduce labels from scratch: `python rebuild_labels_v4.py`
+> To apply model improvements: `python apply_improvements.py`
+> To regenerate figures: `python regen_figures.py`
 
 ---
 
-## 📁 Project Structure
+## Project Structure
 
 ```
 wpfi-fire-risk/
-├── app.py                    # Streamlit dashboard v3.1 (8 tabs, dark theme, RAG)
+├── app.py                    # Streamlit dashboard v4.0 (8 tabs, WPFI_v2, JSON AI)
 ├── config.py                 # Paths, weights, API keys
 ├── forecast_engine.py        # KMA forecast API + LightGBM inference
-├── regen_labels.py           # Temporal+Spatial label regeneration script
+├── generate_report.py        # PDF report generator (ReportLab)
+├── regen_labels.py           # Temporal+Spatial label regeneration
+├── rebuild_labels_v4.py      # WPFI_v2 weather-condition label pipeline
+├── apply_improvements.py     # Lightning rule v2 + month removal retraining
+├── improve_labels.py         # P75 threshold + 3-day window quality improvement
+├── regen_figures.py          # Multi-hazard visualization regeneration
 ├── requirements.txt
 │
 ├── .streamlit/
@@ -215,114 +282,111 @@ wpfi-fire-risk/
 │   ├── 02_spatial_preprocessing.ipynb
 │   ├── 03_buffer_feature_engineering.ipynb
 │   ├── 04_weather_feature_engineering.ipynb
-│   ├── 05_risk_index.ipynb               # 4-layer WPFI index
-│   ├── 06_modeling.ipynb                 # Model C: LightGBM + scale_pos_weight
-│   ├── 07_explainability.ipynb           # SHAP analysis
-│   ├── 08_validation.ipynb               # Ablation, Region CV, external val.
-│   ├── 09_mapping_outputs.ipynb          # Folium maps + figures
-│   └── 10_llm_explanation.ipynb          # GPT-4o-mini + RAG integration
+│   ├── 05_risk_index.ipynb
+│   ├── 06_modeling.ipynb
+│   ├── 07_explainability.ipynb
+│   ├── 08_validation.ipynb
+│   ├── 09_mapping_outputs.ipynb
+│   └── 10_llm_explanation.ipynb
 │
 ├── data/
 │   ├── raw/                  # Contest data (not in repo)
 │   ├── processed/            # Parquet/pkl/gpkg files (not in repo)
-│   └── external/             # Public datasets (see Data Sources)
+│   └── external/             # Public datasets
 │
-└── outputs/
-    ├── figures/              # PNG charts (Apple SD Gothic Neo Korean font)
-    ├── maps/                 # Folium HTML maps
-    └── tables/               # CSV result tables
+├── outputs/
+│   ├── figures/              # PNG charts (fig_multihazard_*.png)
+│   ├── maps/                 # Folium HTML maps
+│   └── tables/               # CSV result tables
+│
+└── reports/
+    └── WPFI_analysis_report_v4.0.pdf
 ```
 
 ---
 
-## 📊 Model Performance
+## Canadian FWI System
 
-| Metric | Value | Note |
-|--------|-------|------|
-| AUC | **0.9574** | LightGBM Model C |
-| Recall@Top5% | 0.628 | 5% inspection → 63% fire events caught |
-| Recall@Top10% | **0.828** | 10% inspection → 83% caught |
-| Recall@Top20% | 0.996 | 20% inspection → ~100% caught |
-| Region CV AUC | **0.977 avg** | 9 stations, all ≥ 0.91 — no regional bias |
-| Weather+FWI SHAP | **33%** | vs. 14% in old geographic-label model |
-| Weather-only AUC | 0.659 | FWI alone has independent predictive power |
+International standard adopted by KMA and forestry agencies worldwide:
 
-### Ablation Study
-
-| Step | Features | AUC |
-|------|----------|-----|
-| M1 | Weather + FWI only | 0.659 |
-| M2 | + Spatial (terrain, forest) | 0.848 |
-| M3 | + Facility (density, cascade) | 0.903 |
-| **M4 (adopted)** | All 39 features | **0.957** |
+| Code | Name | Inputs | Meaning |
+|------|------|--------|---------|
+| FFMC | Fine Fuel Moisture Code | Temp, RH, Wind, Precip | Fine fuel moisture |
+| DMC | Duff Moisture Code | Temp, RH, Precip (14-day) | Duff layer moisture |
+| DC | Drought Code | Temp, Precip (30-day) | Deep soil dryness |
+| ISI | Initial Spread Index | Wind + FFMC | Fire spread speed |
+| BUI | Buildup Index | DMC + DC | Fuel accumulation |
+| **FWI** | **Fire Weather Index** | ISI + BUI | **Final fire danger** |
 
 ---
 
-## 📊 Data Sources
+## Weather Simulation Scenarios
+
+| Condition | P\_dry mult | P\_heat mult | P\_light mult | Description |
+|-----------|------------|-------------|--------------|-------------|
+| ☀️ Clear/Normal | ×1.0 | ×1.0 | ×1.0 | Baseline |
+| 🌧 Rain (Moderate) | ×0.35 | ×0.88 | ×0.85 | 10–30 mm/day |
+| 🌦 Heavy Rain | ×0.10 | ×0.80 | ×0.70 | 50mm+ |
+| ⛈ Thunderstorm | ×0.45 | ×1.10 | ×1.80 | Strong wind + rain + lightning |
+| 🌡 Heatwave | ×1.55 | ×2.20 | ×1.15 | Temp 35°C+ |
+| 🌙 Tropical Night | ×1.20 | ×1.75 | ×1.05 | Night temp ≥25°C |
+| 🏜 Extreme Drought | ×2.80 | ×1.30 | ×1.00 | 14-day no-rain, eff. humidity <25% |
+| 🌬 Strong Wind | ×1.10 | ×1.05 | ×1.30 | Gust 15 m/s+ |
+
+---
+
+## Data Sources
 
 | Dataset | Source | Purpose |
 |---------|--------|---------|
-| Power facility locations (Gangwon) | 날씨마루 (KMA contest) | Base facility data |
+| Power facility locations (Gangwon) | KMA Weather Big Data Contest (날씨마루) ✓ Approved | Base facility data |
 | Daily weather observations (ASOS) | KMA / 날씨마루 | Weather + FWI features |
-| Wildfire statistics 2022–2024 | Korea Forest Service | Temporal+Spatial label design |
-| Electrical fire records 2020–2024 | [NFDS](https://www.nfds.go.kr) | Supplementary validation |
-| ESA WorldCover 10m | [AWS Open Data](https://registry.opendata.aws/esa-worldcover/) | Forest/land cover features |
+| Electrical fire records 2022–2024 | National Fire Data System (NFDS) | Weather-condition label design |
+| Wildfire statistics 2022–2024 | Korea Forest Service | Supplementary label validation |
+| ESA WorldCover 10m | [AWS Open Data](https://registry.opendata.aws/esa-worldcover/) | Forest / land cover features |
 | Copernicus DEM 30m | [AWS Open Data](https://registry.opendata.aws/copernicus-dem/) | Elevation + terrain |
-| Admin boundaries | [KOSTAT](https://sgis.kostat.go.kr) | Visualization |
+| Admin boundaries | KOSTAT | Visualization |
 
 ---
 
-## 🌦️ Weather Simulation Scenarios
-
-| Scenario | WH Multiplier | Conditions |
-|----------|--------------|------------|
-| Baseline | ×1.00 | Actual observed data |
-| Spring Dry-Windy | ×1.35 | Low humidity + strong wind |
-| Summer Heatwave | ×1.20 | High temperature |
-| Autumn Dry | ×1.40 | 14-day no-rain |
-| Winter Strong Wind | ×1.15 | Cold + gusty |
-| Worst-Case Composite | ×1.70 | Extreme drought + wind + heat |
-
----
-
-## 🛠️ Tech Stack
+## Tech Stack
 
 | Category | Libraries |
 |----------|-----------|
 | ML / XAI | LightGBM, scikit-learn, SHAP |
 | Spatial | GeoPandas, Shapely, scikit-learn BallTree |
-| Visualization | Matplotlib (Apple SD Gothic Neo), Folium, streamlit-folium |
-| Web App | Streamlit 1.58 (dark theme, custom CSS Glassmorphism) |
+| Visualization | Matplotlib, Folium, streamlit-folium |
+| Web App | Streamlit 1.58 (dark theme, Glassmorphism CSS) |
 | Data | Pandas 3.x, NumPy 2.x, PyArrow |
-| LLM + RAG | OpenAI GPT-4o-mini + TF-IDF retrieval (106 documents) |
+| LLM + RAG | OpenAI GPT-4o-mini + TF-IDF (106 documents), JSON structured output |
 | Fire Index | Canadian FWI System (FFMC/DMC/DC/ISI/BUI) |
 | Weather API | KMA API Hub |
-| Report | ReportLab PDF |
+| Reports | ReportLab PDF |
 
 ---
 
-## 🗺️ Future Work
+## Future Work
 
 | Priority | Item | Expected Benefit |
 |----------|------|-----------------|
-| Short-term | Wind direction data → fire propagation direction feature | Dynamic directional risk |
-| Short-term | 날씨마루 official data integration → full pipeline re-run | Final contest performance |
-| Mid-term | Knowledge Graph → power network topology cascade analysis | KEPCO grid-level impact |
-| Mid-term | RAG corpus expansion (KMA alert history) | Stronger AI explanation evidence |
+| Short-term | KMA lightning observation data → P\_light ML model | Improved lightning prediction accuracy |
+| Short-term | 30-day accumulated precipitation feature | Dry model AUC 0.75+ target |
+| Medium-term | WPFI\_v2 weight optimization (scipy) | Data-driven 0.5/0.3/0.2 validation |
+| Medium-term | Precision GPS electrical fire data | Spatial separation → AUC 0.85+ possible |
 | Long-term | Real-time streaming pipeline (AWS/GCP) | Operational deployment |
 
 ---
 
-## 📝 License
+## License
 
 MIT License — see [LICENSE](LICENSE) for details.
 
 ---
 
-## 🙏 Acknowledgements
+## Acknowledgements
 
 - **Korea Meteorological Administration (KMA)** — weather data & 날씨마루 platform
-- **Korea Forest Service (KFS)** — wildfire statistics for label design
+- **Korea Forest Service (KFS)** — wildfire statistics
+- **National Fire Data System (NFDS)** — electrical fire records for label design
 - **Natural Resources Canada** — Canadian FWI System methodology
 - **ESA / Copernicus** — WorldCover 10m and DEM via AWS Open Data
-- **National Fire Data System** — electrical fire records
