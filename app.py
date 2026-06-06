@@ -207,6 +207,59 @@ _SIM_BY_ID = {p["id"]: p for p in SIMULATION_PRESETS_DEF}
 SIMULATION_PRESETS = {p["ko"]: {"wh_mult": p["wh_mult"], "desc": p["desc_ko"]}
                       for p in SIMULATION_PRESETS_DEF}
 
+# ── WPFI_v2 날씨 조건별 성분 배수 ─────────────────────────────────────────────
+# P_dry: 건조 기반 (fwi+습도), P_heat: 열 기반 (기온), P_light: 낙뢰 기반 (고도+불안정)
+WEATHER_CONDITIONS = {
+    "☀️ 맑음·보통": {
+        "ko": "☀️ 맑음·보통",    "en": "☀️ Clear/Normal",
+        "desc_ko": "현재 평균 기상 조건",
+        "desc_en": "Average weather conditions",
+        "dry_mult": 1.0, "heat_mult": 1.0, "light_mult": 1.0,
+    },
+    "🌧 비 (보통)": {
+        "ko": "🌧 비 (보통)",     "en": "🌧 Rain (Moderate)",
+        "desc_ko": "강수 10~30mm/day — 건조 위험 감소, 낙뢰 소폭 감소",
+        "desc_en": "10~30mm/day precipitation — reduced dryness, slight lightning decrease",
+        "dry_mult": 0.35, "heat_mult": 0.88, "light_mult": 0.85,
+    },
+    "🌦 폭우": {
+        "ko": "🌦 폭우",         "en": "🌦 Heavy Rain",
+        "desc_ko": "강수 50mm+ — 극단적 건조 위험 억제",
+        "desc_en": "50mm+ precipitation — extreme dryness suppression",
+        "dry_mult": 0.10, "heat_mult": 0.80, "light_mult": 0.70,
+    },
+    "⛈ 폭풍우·뇌우": {
+        "ko": "⛈ 폭풍우·뇌우",   "en": "⛈ Thunderstorm",
+        "desc_ko": "강풍+강우+낙뢰 복합 — 낙뢰 위험 급등, 건조 감소",
+        "desc_en": "Strong wind + rain + lightning — lightning risk spikes",
+        "dry_mult": 0.45, "heat_mult": 1.10, "light_mult": 1.80,
+    },
+    "🌡 폭염": {
+        "ko": "🌡 폭염",          "en": "🌡 Heatwave",
+        "desc_ko": "기온 35°C+ — 열 위험 최고조, 건조도 동반 상승",
+        "desc_en": "35°C+ temperature — peak heat risk, dryness co-increases",
+        "dry_mult": 1.55, "heat_mult": 2.20, "light_mult": 1.15,
+    },
+    "🌙 열대야": {
+        "ko": "🌙 열대야",        "en": "🌙 Tropical Night",
+        "desc_ko": "야간 최저기온 25°C 이상 지속 — 열 스트레스 누적",
+        "desc_en": "Night temp ≥25°C — accumulated heat stress",
+        "dry_mult": 1.20, "heat_mult": 1.75, "light_mult": 1.05,
+    },
+    "🏜 극건조·건조경보": {
+        "ko": "🏜 극건조·건조경보", "en": "🏜 Extreme Drought",
+        "desc_ko": "연속 무강수 14일+, 실효습도 25% 미만 — FWI 최고조",
+        "desc_en": "14-day+ no-rain, eff. humidity <25% — FWI peaks",
+        "dry_mult": 2.80, "heat_mult": 1.30, "light_mult": 1.00,
+    },
+    "🌬 강풍·돌풍": {
+        "ko": "🌬 강풍·돌풍",     "en": "🌬 Strong Wind/Gusts",
+        "desc_ko": "순간풍속 15m/s+ — 불씨 비산 위험, 낙뢰 확률 상승",
+        "desc_en": "Gust 15m/s+ — ember spread risk, slight lightning increase",
+        "dry_mult": 1.10, "heat_mult": 1.05, "light_mult": 1.30,
+    },
+}
+
 # 관측소명 한→영 매핑 (KMA 공식 영문명)
 STATION_EN = {
     "춘천": "Chuncheon",  "홍천": "Hongcheon", "인제": "Inje",
@@ -1173,30 +1226,76 @@ def main():
                               [t('wpfi_score', lang), t('ml_score', lang)], index=0)
         risk_col = 'final_risk' if score_type == t('wpfi_score', lang) else 'ml_score'
 
-        # ── 기상 시뮬레이션 ─────────────────────────────────────────────────
+        # ── WPFI_v2 기상 시뮬레이터 ────────────────────────────────────────────
         st.markdown("---")
         st.markdown(f"### {t('scenario_lbl', lang)}")
-        # 언어에 맞는 레이블 목록
-        sim_labels = [p['en'] if lang == 'en' else p['ko'] for p in SIMULATION_PRESETS_DEF]
-        sel_sim_label = st.selectbox(t('scenario_sel', lang), sim_labels)
-        # 내부 ID 역조회
-        label_key = 'en' if lang == 'en' else 'ko'
-        sel_preset = next((p for p in SIMULATION_PRESETS_DEF if p[label_key] == sel_sim_label),
-                          SIMULATION_PRESETS_DEF[0])
-        preset_desc = sel_preset['desc_en'] if lang == 'en' else sel_preset['desc_ko']
-        st.caption(f"📌 {preset_desc}")
 
-        with st.expander(t('fine_tune', lang)):
-            wh_add = st.slider(t('wh_adjust', lang), -20, +30, 0)
-            sp_add = st.slider(t('sp_adjust', lang), -10, +20, 0)
+        # 날씨 타입 선택
+        weather_keys = list(WEATHER_CONDITIONS.keys())
+        weather_key = st.selectbox(
+            "🌤 날씨 조건 선택" if lang == 'ko' else "🌤 Weather Condition",
+            weather_keys,
+            format_func=lambda k: WEATHER_CONDITIONS[k]['ko'] if lang == 'ko'
+                                   else WEATHER_CONDITIONS[k]['en']
+        )
+        wc = WEATHER_CONDITIONS[weather_key]
+        st.caption(f"📌 {wc['desc_ko'] if lang == 'ko' else wc['desc_en']}")
 
-        is_sim = (sel_preset['id'] != 'baseline') or (wh_add != 0) or (sp_add != 0)
-        # apply_simulation은 내부적으로 wh_mult만 사용 → 직접 전달
-        if is_sim:
+        # 세부 파라미터 슬라이더
+        with st.expander("🔧 세부 날씨 파라미터 직접 조정" if lang == 'ko'
+                         else "🔧 Fine-tune Weather Parameters"):
+            col_s1, col_s2 = st.columns(2)
+            with col_s1:
+                temp_delta    = st.slider("🌡 기온 조정 (°C)" if lang == 'ko' else "🌡 Temp Adjust (°C)",
+                                          -15, +15, 0, help="양수: 고온 → P_heat ↑")
+                humidity_delta = st.slider("💧 습도 조정 (%)" if lang == 'ko' else "💧 Humidity Adjust (%)",
+                                           -40, +20, 0, help="음수: 건조 → P_dry ↑")
+            with col_s2:
+                precip_day    = st.slider("🌧 강수량 (mm/day)" if lang == 'ko' else "🌧 Precipitation (mm/day)",
+                                          0, 100, 0, help="강수 → P_dry ↓")
+                fwi_mult      = st.slider("🔥 FWI 배수" if lang == 'ko' else "🔥 FWI Multiplier",
+                                          0.1, 5.0, 1.0, step=0.1,
+                                          help="FWI 강도 → P_dry 직접 영향 (33% 기여)")
+
+        # delta 계산 (피처 중요도 기반 선형 근사)
+        # P_dry: fwi_dry_streak 33% + eff_humidity 7% + rh_min 6% + precip 7%
+        fwi_factor      = fwi_mult ** 0.40          # 33% 기여 → 제곱근 완화
+        humidity_factor = max(0.05, 1.0 - humidity_delta * 0.018)  # 습도 낮을수록 건조 ↑
+        rain_factor     = max(0.05, 1.0 - precip_day / 45.0)       # 강수 50mm → P_dry 거의 0
+        dry_combined    = wc['dry_mult'] * fwi_factor * humidity_factor * rain_factor
+
+        # P_heat: heat_score 53% + temp 4%
+        temp_factor  = 1.0 + temp_delta * 0.045   # 1°C 당 4.5% 기여
+        heat_combined = wc['heat_mult'] * temp_factor
+
+        # P_light: 고도 기반 (온도 불안정 영향 반영)
+        light_instab = 1.0 + max(0, temp_delta) * 0.02  # 고온 → 대기불안정 ↑
+        light_combined = wc['light_mult'] * light_instab
+
+        # WPFI_v2 재계산
+        is_sim = (weather_key != "☀️ 맑음·보통") or (temp_delta != 0) or \
+                 (humidity_delta != 0) or (precip_day != 0) or (fwi_mult != 1.0)
+
+        if is_sim and 'prob_dry' in df.columns:
             df_sim = df.copy()
-            df_sim['weather_hazard'] = (df_sim['weather_hazard'] * sel_preset['wh_mult'] + wh_add).clip(0, 100)
-            if sp_add != 0:
-                df_sim['spatial_exposure'] = (df_sim['spatial_exposure'] + sp_add).clip(0, 100)
+            df_sim['prob_dry']  = (df['prob_dry']   * dry_combined).clip(0, 1)
+            df_sim['prob_heat'] = (df['prob_heat']   * heat_combined).clip(0, 1)
+            df_sim['prob_light']= (df['prob_light']  * light_combined).clip(0, 1)
+            df_sim['final_risk']= (
+                0.50 * df_sim['prob_dry'] +
+                0.30 * df_sim['prob_heat'] +
+                0.20 * df_sim['prob_light']
+            ).clip(0, 1) * 100
+            VH = GRADE_THRESHOLDS_ACTUAL["Very High"]
+            HI = GRADE_THRESHOLDS_ACTUAL["High"]
+            MO = GRADE_THRESHOLDS_ACTUAL["Moderate"]
+            df_sim['risk_grade'] = df_sim['final_risk'].apply(
+                lambda s: 'Very High' if s >= VH else ('High' if s >= HI else
+                          ('Moderate' if s >= MO else 'Low')))
+        elif is_sim:
+            # fallback: prob_dry 없을 때 구 방식
+            df_sim = df.copy()
+            df_sim['weather_hazard'] = (df_sim['weather_hazard'] * dry_combined + temp_delta).clip(0, 100)
             df_sim['final_risk'] = (
                 df_sim['weather_hazard']    * WEIGHTS['weather'] +
                 df_sim['spatial_exposure']  * WEIGHTS['spatial'] +
@@ -1204,23 +1303,49 @@ def main():
                 df_sim['hist_prior']        * WEIGHTS['prior']
             ).clip(0, 100)
             VH_THR, HI_THR, MO_THR = GRADE_THRESHOLDS_SIM["Very High"], GRADE_THRESHOLDS_SIM["High"], GRADE_THRESHOLDS_SIM["Moderate"]
-            def _sim_grade(s):
-                if s >= VH_THR: return 'Very High'
-                if s >= HI_THR: return 'High'
-                if s >= MO_THR: return 'Moderate'
-                return 'Low'
-            df_sim['risk_grade'] = df_sim['final_risk'].apply(_sim_grade)
+            df_sim['risk_grade'] = df_sim['final_risk'].apply(
+                lambda s: 'Very High' if s >= VH_THR else ('High' if s >= HI_THR else
+                          ('Moderate' if s >= MO_THR else 'Low')))
         else:
             df_sim = df
 
+        # 시뮬레이션 결과 미리보기 (WPFI_v2 성분별)
+        if is_sim and 'prob_dry' in df.columns:
+            orig_dry  = df['prob_dry'].mean();  sim_dry  = df_sim['prob_dry'].mean()
+            orig_heat = df['prob_heat'].mean(); sim_heat = df_sim['prob_heat'].mean()
+            orig_light= df['prob_light'].mean();sim_light= df_sim['prob_light'].mean()
+            orig_wpfi = df['final_risk'].mean();sim_wpfi = df_sim['final_risk'].mean()
+
+            st.markdown("**📊 WPFI_v2 성분 변화 미리보기**" if lang == 'ko'
+                        else "**📊 WPFI_v2 Component Preview**")
+            prev_cols = st.columns(4)
+            for col, label, orig, sim, color in [
+                (prev_cols[0], "P_dry (건조)" if lang=='ko' else "P_dry", orig_dry, sim_dry, "#1f77b4"),
+                (prev_cols[1], "P_heat (고온)" if lang=='ko' else "P_heat", orig_heat, sim_heat, "#d62728"),
+                (prev_cols[2], "P_light (낙뢰)" if lang=='ko' else "P_light", orig_light, sim_light, "#2ca02c"),
+                (prev_cols[3], "WPFI_v2 /100" if lang=='ko' else "WPFI_v2", orig_wpfi, sim_wpfi, "#ff7f0e"),
+            ]:
+                chg = (sim - orig) / max(orig, 0.0001) * 100
+                arrow = "▲" if chg > 0.5 else ("▼" if chg < -0.5 else "━")
+                col.markdown(f"""
+<div style='background:rgba(255,255,255,0.05);border-radius:8px;padding:8px;
+            border-left:3px solid {color};text-align:center'>
+  <div style='font-size:0.7rem;color:rgba(255,255,255,0.55)'>{label}</div>
+  <div style='font-size:0.85rem;color:{color};font-weight:700'>{sim:.4f}</div>
+  <div style='font-size:0.7rem;color:{"#ff6b6b" if chg>0 else "#6bcfff"}'>{arrow} {chg:+.1f}%</div>
+</div>""", unsafe_allow_html=True)
+
+        orig_vh = (df['risk_grade'] == 'Very High').sum()
+        sim_vh  = (df_sim['risk_grade'] == 'Very High').sum()
+        delta   = sim_vh - orig_vh
         if is_sim:
-            orig_vh = (df['risk_grade'] == 'Very High').sum()
-            sim_vh  = (df_sim['risk_grade'] == 'Very High').sum()
-            delta   = sim_vh - orig_vh
+            badge = wc['ko'] if lang == 'ko' else wc['en']
             if lang == 'en':
-                st.warning(f"⚠️ Simulation Active: {sel_preset['en']}\nVery High: {orig_vh:,} → {sim_vh:,} ({delta:+,})")
+                st.warning(f"⚠️ Simulation Active: {badge}\n"
+                           f"Very High: {orig_vh:,} → {sim_vh:,} ({delta:+,})")
             else:
-                st.warning(f"⚠️ 시뮬레이션 적용 중: {sel_preset['ko']}\nVery High: {orig_vh:,} → {sim_vh:,} ({delta:+,})")
+                st.warning(f"⚠️ 시뮬레이션 적용 중: {badge}\n"
+                           f"Very High: {orig_vh:,} → {sim_vh:,} ({delta:+,}개)")
 
         st.markdown("<hr style='border-color:rgba(255,255,255,0.08)'>", unsafe_allow_html=True)
         st.markdown(f"#### {t('stats_lbl', lang)}")
@@ -1329,7 +1454,7 @@ def main():
     with tab1:
         st.markdown(t('map_title', lang))
         if is_sim:
-            sim_mode_label = sel_preset['en'] if lang == 'en' else sel_preset['ko']
+            sim_mode_label = wc['en'] if lang == 'en' else wc['ko']
             st.warning(f"⚠️ {'Simulation Mode' if lang=='en' else '시뮬레이션 모드'}: {sim_mode_label}")
         st.caption(t('map_caption', lang))
 
@@ -1344,7 +1469,7 @@ def main():
         k = max(1, int(len(df_view) * topk_pct / 100))
         st.markdown(t('list_title', lang).format(topk_pct, k))
         if is_sim:
-            sim_mode_label2 = sel_preset['en'] if lang == 'en' else sel_preset['ko']
+            sim_mode_label2 = wc['en'] if lang == 'en' else wc['ko']
             st.warning(f"⚠️ {'Simulation Active' if lang=='en' else '시뮬레이션 적용'}: {sim_mode_label2}")
 
         disp_cols = ['pole_id','final_risk','risk_grade','ml_score',
@@ -1485,13 +1610,17 @@ def main():
         st.markdown("##### 📊 LightGBM 모델 성능 검증")
 
         with st.expander(t('model_explain_title', lang), expanded=True):
-            auc_val = perf['model_perf']['auc'].max() if 'model_perf' in perf else 0
-            w_pct   = perf['model_perf']['weather_pct'].max() if 'model_perf' in perf else 0
-            r10_val = perf['model_perf']['recall_top10'].max() if 'model_perf' in perf else 0
+            # model_perf CSV는 index_col 없이 로드되므로 iloc으로 안전하게 접근
+            _mp    = perf.get('model_perf', pd.DataFrame())
+            auc_val  = float(_mp['auc'].max())       if 'auc'          in _mp.columns else 0
+            w_pct    = float(_mp['weather_pct'].max()) if 'weather_pct' in _mp.columns else 0
+            r10_val  = float(_mp['recall_top10'].max()) if 'recall_top10' in _mp.columns else 0
+            dry_auc  = float(_mp['auc'].iloc[0])     if len(_mp) > 0 else 0
+            heat_auc = float(_mp['auc'].iloc[1])     if len(_mp) > 1 else 0
             if lang == 'en':
                 st.markdown(f"""
 **WPFI_v2 Multi-Hazard Model Performance**
-- **AUC: Dry {perf['model_perf'].loc['건조형','auc']:.4f} / Heat {perf['model_perf'].loc['고온형','auc']:.4f}**
+- **AUC: Dry {dry_auc:.4f} / Heat {heat_auc:.4f}**
   — Closer to 1.0 = perfect discrimination. 0.5 = random. Current values reflect genuine weather-driven prediction.
 - **Weather Contribution: {w_pct:.1f}%** — Top-5 features are all weather variables. Zero calendar dependency.
 - **Recall@Top10%: {r10_val:.3f}** — Inspecting only top 10% of facilities captures this fraction of true fire-risk cases.
@@ -1500,7 +1629,7 @@ def main():
             else:
                 st.markdown(f"""
 **WPFI_v2 멀티해저드 모델 성능**
-- **AUC: 건조형 {perf['model_perf'].loc['건조형','auc']:.4f} / 고온형 {perf['model_perf'].loc['고온형','auc']:.4f}**
+- **AUC: 건조형 {dry_auc:.4f} / 고온형 {heat_auc:.4f}**
   — 1.0에 가까울수록 완벽. 0.5는 무작위. 현재 값은 순수 날씨 기반 예측의 현실적 수준입니다.
 - **날씨 기여도: {w_pct:.1f}%** — Top-5 피처 전부 기상 변수. 달력(month/season) 의존도 0%.
 - **Recall@Top10%: {r10_val:.3f}** — 상위 10% 설비만 점검 시 실제 화재 위험 설비의 {r10_val*100:.1f}%를 포함.

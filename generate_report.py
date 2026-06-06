@@ -162,8 +162,8 @@ def build_pdf(output_path: str):
         Paragraph("Explainable GeoAI 기반 전력설비 화재위험 우선점검 시스템", S["h2"]),
         Paragraph("2026 날씨 빅데이터 콘테스트 — 주제 1", S["body"]),
         Spacer(1, 0.3*cm),
-        Paragraph("프로젝트 종합 문서 v1.0", S["body_small"]),
-        Paragraph("작성일: 2026년 5월 30일", S["body_small"]),
+        Paragraph("프로젝트 종합 문서 v4.0", S["body_small"]),
+        Paragraph("작성일: 2026년 6월 6일 (최종 업데이트)", S["body_small"]),
     ]:
         story.append(line)
     story.append(PageBreak())
@@ -190,7 +190,8 @@ def build_pdf(output_path: str):
         ("  6.6", "SHAP Explainability 분석", ""),
         ("  6.7", "검증 전략", ""),
         ("  6.8", "지도 시각화 및 출력", ""),
-        ("7.", "Feature 전체 목록 (42개+)", ""),
+        ("6.9", "WPFI_v2 멀티해저드 3성분 모델 (v4.0)", ""),
+        ("7.", "Feature 전체 목록 (34개 — 달력 제거)", ""),
         ("8.", "기술 스택", ""),
         ("9.", "OpenAI LLM 자연어 설명 모듈", ""),
         ("10.", "Streamlit GUI 앱", ""),
@@ -304,7 +305,7 @@ def build_pdf(output_path: str):
     story.append(Paragraph("4. 데이터셋 전체 목록", S["h1"]))
     story.append(section_line())
 
-    story.append(Paragraph("4.1 대회 제공 데이터 (날씨마루 Hive — 승인 대기)", S["h2"]))
+    story.append(Paragraph("4.1 대회 제공 데이터 (날씨마루 Hive — 승인 완료 ✓)", S["h2"]))
     core_data = [
         ["데이터", "제공처", "내용", "파이프라인 역할"],
         ["기상 일자료", "기상청", "기온·습도·풍속·강수·실효습도 일별 관측값", "Weather Hazard Score"],
@@ -443,33 +444,74 @@ def build_pdf(output_path: str):
     story.append(table(grade_data, [3*cm, 3*cm, 3*cm, 7*cm], header_bg=DGRAY))
     story.append(PageBreak())
 
-    story.append(Paragraph("6.5 ML 모델링 (Case A / Case B 분기)", S["h2"]))
-    story.append(Paragraph(b("Case A — Supervised ML (label 있을 때)"), S["h3"]))
+    story.append(Paragraph("6.5 ML 모델링 (WPFI_v2 멀티해저드 — v4.0)", S["h2"]))
     story.append(Paragraph(
-        "날씨마루 화재 데이터에 발생 여부/위치 정보가 있을 때 실행됩니다.", S["body"]))
-    ml_data = [
-        ["모델", "특징", "역할"],
-        ["Logistic Regression", "선형, 해석 용이", "Baseline"],
-        ["Random Forest", "비선형 앙상블", "Feature importance 참고"],
-        ["LightGBM", "빠른 학습, categorical 처리", "Main 후보"],
-        ["XGBoost", "높은 성능, 안정적", "Main 후보"],
+        b("WPFI_v2 = 0.5 × P_dry + 0.3 × P_heat + 0.2 × P_light") +
+        " — 소방청 전기화재 1,758건(강원 2022~2024)을 화재 발생일 날씨 조건으로 분류한 "
+        "3성분 멀티해저드 모델입니다.", S["body"]))
+
+    story.append(Paragraph("Label 재설계 (핵심 혁신)", S["h3"]))
+    label_data = [
+        ["구분", "label_dry (건조형)", "label_heat (고온형)"],
+        ["정의", "화재 발생일 dry_streak≥5 AND fwi≥2.7", "화재 발생일 temp_max≥27.2°C"],
+        ["임계값", "P75 (상위 25% 건조 조건)", "P75 (상위 25% 고온 조건)"],
+        ["시간 윈도우", "[-3일, 0]", "[-3일, 0]"],
+        ["양성률", "3.15% (96,408건)", "8.41% (257,046건)"],
+        ["달력 의존도", "0% (month/season 완전 제거)", "0%"],
     ]
-    story.append(table(ml_data, [4*cm, 6*cm, 6*cm], header_bg=GREEN))
+    story.append(table(label_data, [3.5*cm, 6.5*cm, 6.5*cm], header_bg=GREEN))
+    story.append(Spacer(1, 0.3*cm))
+
+    story.append(Paragraph("모델 성능 (v4.0 최종)", S["h3"]))
+    perf_data = [
+        ["모델", "AUC", "Recall@Top10%", "날씨기여", "달력기여"],
+        ["P_dry (건조형 LightGBM)", "0.737", "0.320", c("94.8%", "#1E8449"), c("0%", "#1E8449")],
+        ["P_heat (고온형 LightGBM)", "0.806", "0.285", c("94.7%", "#1E8449"), c("0%", "#1E8449")],
+        ["P_light (낙뢰 Rule-based)", "—", "—", c("100%", "#1E8449"), "—"],
+    ]
+    story.append(table(perf_data, [4.5*cm, 2*cm, 3.5*cm, 3*cm, 3*cm], header_bg=BLUE))
+    story.append(Spacer(1, 0.2*cm))
+
+    story.append(Paragraph("날씨 신호 분리도 (물리적 타당성 검증)", S["h3"]))
+    signal_data = [
+        ["날씨 피처", "건조형 label=1 vs 0", "고온형 label=1 vs 0"],
+        ["fwi_score", c("+118.9%", "#C0392B"), "-21.4%"],
+        ["dryness_score", c("+47.8%", "#C0392B"), c("-26.9%", "#1E8449")],
+        ["heat_score", c("-10.5%", "#1E8449"), c("+70.7%", "#C0392B")],
+        ["eff_humidity", c("-23.6%", "#1E8449"), "+7.5%"],
+        ["wind_score", "+39.8%", c("-16.5%", "#1E8449")],
+    ]
+    story.append(table(signal_data, [4*cm, 6*cm, 6*cm], header_bg=LBLUE))
+    story.append(Paragraph(
+        "두 모델이 완벽히 반대 방향의 기상 패턴을 학습합니다 — 물리적으로 타당.",
+        S["note"]))
+
+    story.append(Paragraph("계절 패턴 검증", S["h3"]))
+    season_data = [
+        ["계절", "건조형 양성률", "고온형 양성률", "해석"],
+        ["봄 (3~5월)", "4.0%", "3.4%", "건조 시즌 시작"],
+        ["여름 (6~8월)", "1.9%", c("27.7%", "#C0392B"), "폭염 집중 — 물리적 타당"],
+        ["가을 (9~11월)", "1.5%", "4.7%", "열 잔존"],
+        ["겨울 (12~2월)", c("5.2%", "#C0392B"), c("0%", "#1E8449"), "건조 최고조 — 물리적 타당"],
+    ]
+    story.append(table(season_data, [2.5*cm, 3*cm, 3*cm, 8*cm], header_bg=DGRAY))
+    story.append(Spacer(1, 0.2*cm))
+
+    story.append(Paragraph(b("낙뢰 Rule v2 (P_light)"), S["h3"]))
+    story.append(Paragraph(
+        "P_light = 0.50 × 고도(정규화) + 0.30 × 여름일교차(대기불안정) + 0.20 × 여름습도. "
+        "기존 고도만 사용(상관계수 1.0000)에서 복합 기상 proxy(0.9818)로 개선. "
+        "태백시 0.834, 인제군 0.753, 평창군 0.741이 고위험.", S["body"]))
+
     story.append(Spacer(1, 0.2*cm))
     story.append(Paragraph("핵심 평가 지표:", S["body"]))
     for txt in [
-        "AUC — 전체 순위화 성능",
-        "Recall@Top-K — 상위 K% 설비에 실제 위험 설비가 몇 % 포함되는가 (실용적 핵심 지표)",
-        "Precision@Top-K — 점검 자원 효율성",
-        "Region-based Split — 공간 데이터 과대평가 방지 검증",
+        "AUC — 전체 순위화 성능 (건조형 0.737 / 고온형 0.806)",
+        "날씨기여 % — Top-5 피처 중 날씨 피처 비율 (94.7~94.8%, 달력 0%)",
+        "Recall@Top10% — 상위 10% 점검 시 실제 화재 위험 설비 포함률",
+        "계절 패턴 — 건조형 겨울/봄 집중, 고온형 여름 집중 (물리적 타당성)",
     ]:
         story.append(Paragraph(f"• {txt}", S["bullet"]))
-
-    story.append(Spacer(1, 0.2*cm))
-    story.append(Paragraph(b("Case B — Risk Prioritisation (label 없을 때)"), S["h3"]))
-    story.append(Paragraph(
-        "화재 label이 없을 경우 Rule-based Risk Index + HDBSCAN 클러스터링 + KernelExplainer SHAP을 적용합니다. "
-        "모델 표현은 '예측 모델'이 아닌 '위험도 산정 및 우선순위화 모델'로 설명합니다.", S["body"]))
 
     story.append(Paragraph("6.6 SHAP Explainability 분석", S["h2"]))
     story.append(Paragraph(
@@ -505,7 +547,25 @@ def build_pdf(output_path: str):
     # ═══════════════════════════════════════════════════════════
     # 7. Feature 전체 목록
     # ═══════════════════════════════════════════════════════════
-    story.append(Paragraph("7. Feature 전체 목록 (42개+)", S["h1"]))
+    # ── 6.9 WPFI_v2 아키텍처 요약 ──────────────────────────────────────────────
+    story.append(Paragraph("6.9 WPFI_v2 아키텍처 요약 (v4.0)", S["h2"]))
+    arch_data = [
+        ["구성요소", "가중치", "학습 방식", "주요 피처 (Top-3)", "날씨기여"],
+        ["P_dry (건조형)", "50%", "LightGBM",
+         "fwi_dry_streak(33%), fwi_isi(7%), eff_humidity(7%)", "94.8%"],
+        ["P_heat (고온형)", "30%", "LightGBM",
+         "heat_score(53%), accumulated_risk(5%), temp_max(4%)", "94.7%"],
+        ["P_light (낙뢰형)", "20%", "Rule-based",
+         "elevation(50%), 여름일교차(30%), 여름습도(20%)", "100%"],
+    ]
+    story.append(table(arch_data, [2.5*cm, 1.5*cm, 2.5*cm, 7.5*cm, 2.5*cm], header_bg=DARKRED))
+    story.append(Paragraph(
+        "WPFI_v2 = 0.5×P_dry + 0.3×P_heat + 0.2×P_light → 0~100점 변환 (hazard_combined×100). "
+        "Very High≥36.9 / High≥30.2 / Moderate≥16.9 / Low<16.9.",
+        S["highlight"]))
+    story.append(PageBreak())
+
+    story.append(Paragraph("7. Feature 전체 목록 (34개 — 달력 피처 제거)", S["h1"]))
     story.append(section_line())
 
     story.append(Paragraph("Weather Hazard Layer — 19개", S["h3"]))
@@ -716,26 +776,30 @@ def build_pdf(output_path: str):
         ["10_llm_explanation.ipynb", "✓ 완료", "GPT-4o-mini 연동, 캐시"],
         ["Streamlit app.py", "✓ 완료", "4탭, Folium 지도, 미리보기 모드"],
         ["날씨마루 접속 신청", "✓ 완료", "분석 플랫폼 '사용' 신청 완료"],
-        ["날씨마루 데이터 승인", "⏳ 대기", "승인 즉시 01번 notebook 실행"],
-        ["01_data_check 실행", "⏳ 승인 후", "Hive 테이블명, label 유무 확인"],
-        ["02~09 notebook 실행", "⏳ 승인 후", "당일 실험 가능 상태"],
-        ["임상도 신청 (산림청)", "⏳ 선택", "신청 시 1~2일 소요"],
-        ["보고서 작성 (6페이지 hwpx)", "⏳ 실험 후", "제출 마감: 6월 26일"],
+        ["날씨마루 데이터 승인", "✓ 완료", "승인 완료 — 데이터 접근 및 활용 중"],
+        ["01_data_check 실행", "✓ 완료", "Hive 테이블 확인, 전봇대 1,387,831개 추출"],
+        ["02~09 notebook 실행", "✓ 완료", "전체 파이프라인 완성 (v4.0 WPFI_v2)"],
+        ["임상도 신청 (산림청)", "✓ 완료", "ESA WorldCover 10m 대체 활용"],
+        ["보고서 작성 (6페이지 hwpx)", "⏳ 진행 중", "제출 마감: 2026년 6월 26일"],
     ]
     story.append(table(status_data, [6.5*cm, 2.5*cm, 7*cm], header_bg=DGRAY))
     story.append(Spacer(1, 0.3*cm))
 
-    story.append(Paragraph("날씨마루 승인 직후 실행 순서", S["h3"]))
-    for i, txt in enumerate([
-        "01_data_check.ipynb: DESCRIBE 쿼리 → 실제 컬럼명 확인, column_map.json 완성",
-        "02~05: 공간 전처리 → buffer feature → 기상 feature → risk index",
-        "06: label 확인 → Case A (LightGBM + SHAP) 또는 Case B 자동 분기",
-        "07~09: SHAP 설명 → 검증 → 지도 출력",
-        "10: OpenAI API 키 입력 → 상위 설비 자연어 설명 생성",
-        "app.py: streamlit run app.py → GUI 실시간 확인",
-        "보고서: 결과 기반 6페이지 hwpx 작성 (제출: 6월 26일)",
-    ], 1):
-        story.append(Paragraph(f"{i}. {txt}", S["bullet"]))
+    story.append(Paragraph("전체 파이프라인 완성 현황 (v4.0 기준)", S["h3"]))
+    pipeline_status = [
+        ["단계", "완료 여부", "세부 내용"],
+        ["날씨마루 데이터 승인", "✓ 완료", "전봇대 1,387,831개, KMA ASOS 11개 관측소"],
+        ["공간 전처리 (01~03)", "✓ 완료", "EPSG:4326 통일, BallTree 1km 버퍼 피처"],
+        ["기상 피처 엔지니어링 (04)", "✓ 완료", "FWI + 34개 날씨 피처, 달력 피처 제거"],
+        ["WPFI_v2 label 설계 (05)", "✓ 완료", "날씨 조건 기반 label_dry/heat (P75, 3일)"],
+        ["멀티해저드 모델 학습 (06)", "✓ 완료", "건조형 AUC 0.737 / 고온형 AUC 0.806"],
+        ["SHAP 설명 분석 (07)", "✓ 완료", "날씨기여 94.7~94.8%, 달력 의존도 0%"],
+        ["검증 + 지도 출력 (08~09)", "✓ 완료", "등급별 지도, 시군구별 위험 분포"],
+        ["Streamlit GUI v4.0", "✓ 완료", "8탭, WPFI_v2 시뮬레이터, JSON AI 요약"],
+        ["보고서 v4.0", "✓ 완료", "본 PDF (2026-06-06 기준)"],
+        ["최종 제출 보고서 (hwpx)", "⏳ 진행 중", "제출 마감: 2026년 6월 26일"],
+    ]
+    story.append(table(pipeline_status, [4.5*cm, 2*cm, 9.5*cm], header_bg=GREEN))
     story.append(PageBreak())
 
     # ═══════════════════════════════════════════════════════════
@@ -792,7 +856,8 @@ def build_pdf(output_path: str):
     story.append(divider())
     story.append(Paragraph(
         "본 문서는 WPFI 프로젝트의 모든 설계 내용, 수행 작업, 데이터 현황을 담고 있습니다. "
-        "날씨마루 승인 후 실험 결과가 추가되면 v2.0으로 업데이트할 예정입니다.",
+        "날씨마루 데이터 승인 완료. WPFI_v2 멀티해저드 모델(v4.0) 전체 파이프라인 구축 완료. "
+        "강원도 전봇대 1,387,831개 분석, Streamlit 앱 배포 중.",
         S["note"]))
 
     doc.build(story)
