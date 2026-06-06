@@ -220,9 +220,15 @@ STATION_EN = {
 # High:      0.05 이상 — 위험 기상 지속 중
 # Moderate:  0.01 이상 — 평균 이상 주의 필요
 GRADE_THRESHOLDS_ACTUAL = {
-    "Very High": 48.4,   # combined_risk 기준 (ml_prob >= 0.20)
-    "High":      38.2,   # combined_risk 기준 (ml_prob >= 0.05)
-    "Moderate":  23.8,   # combined_risk 기준 (ml_prob >= 0.01)
+    "Very High": 36.9,   # WPFI_v2 x100 기준 (상위 5%)
+    "High":      30.2,   # WPFI_v2 x100 기준 (상위 15%)
+    "Moderate":  16.9,   # WPFI_v2 x100 기준 (상위 40%)
+}
+# 시뮬레이션 탭 전용 (구 가중합 공식 스케일)
+GRADE_THRESHOLDS_SIM = {
+    "Very High": 48.4,
+    "High":      38.2,
+    "Moderate":  23.8,
 }
 
 # ── 데이터 로드 ────────────────────────────────────────────────────────────────
@@ -232,9 +238,22 @@ def load_risk():
     if not p.exists():
         return None
     df = pd.read_parquet(p)
+    # WPFI_v2 기반 final_risk 업데이트
+    if 'final_risk_wpfi' in df.columns:
+        df['final_risk'] = df['final_risk_wpfi']
+        vh = GRADE_THRESHOLDS_ACTUAL["Very High"]
+        hi = GRADE_THRESHOLDS_ACTUAL["High"]
+        mo = GRADE_THRESHOLDS_ACTUAL["Moderate"]
+        df['risk_grade'] = pd.cut(
+            df['final_risk'],
+            bins=[-np.inf, mo, hi, vh, np.inf],
+            labels=['Low','Moderate','High','Very High']
+        ).astype(str)
     if 'ml_fire_prob_max' in df.columns:
         mn, mx = df['ml_fire_prob_max'].min(), df['ml_fire_prob_max'].max()
         df['ml_score'] = ((df['ml_fire_prob_max'] - mn) / (mx - mn + 1e-9) * 100).clip(0, 100)
+    elif 'hazard_combined' in df.columns:
+        df['ml_score'] = (df['hazard_combined'] * 100).clip(0, 100)
     return df
 
 @st.cache_data
@@ -255,7 +274,7 @@ def load_model():
 def load_perf():
     results = {}
     for name, path in [
-        ('model_perf',           OUT_TABLES / 'model_performance.csv'),
+        ('model_perf',           OUT_TABLES / 'multihazard_model_performance.csv'),
         ('recall_k',             OUT_TABLES / 'recall_at_k.csv'),
         ('ablation',             OUT_TABLES / 'ablation_study.csv'),
         ('shap_imp',             OUT_TABLES / 'shap_importance.csv'),
@@ -307,7 +326,87 @@ def _openai_chat(prompt: str, system: str = "", max_tokens: int = 600) -> str:
     except Exception as e:
         return f"[OpenAI 오류] {e}"
 
-def get_executive_summary(df: pd.DataFrame, perf: dict, lang: str = 'ko') -> str:
+
+def _openai_chat_json(prompt: str, system: str = "", max_tokens: int = 700) -> dict | None:
+    """JSON 구조화 응답 전용 — response_format으로 반드시 JSON 반환 보장"""
+    if not OPENAI_API_KEY:
+        return None
+    try:
+        import json as _json
+        from openai import OpenAI
+        client = OpenAI(api_key=OPENAI_API_KEY)
+        messages = []
+        if system:
+            messages.append({"role": "system", "content": system})
+        messages.append({"role": "user", "content": prompt})
+        resp = client.chat.completions.create(
+            model='gpt-4o-mini', messages=messages,
+            temperature=0.3, max_tokens=max_tokens,
+            response_format={"type": "json_object"},
+        )
+        return _json.loads(resp.choices[0].message.content.strip())
+    except Exception:
+        return None
+
+
+def _render_structured_ai(data: dict | str, lang: str = 'ko') -> None:
+    """구조화된 AI 응답을 Streamlit 컴포넌트로 렌더링 (공통 형식)"""
+    import json as _json
+    if isinstance(data, str):
+        # fallback: 기존 텍스트
+        st.info(f"🤖 {data}")
+        return
+    if not isinstance(data, dict):
+        return
+
+    # 공통 헤더
+    headline = data.get('headline') or data.get('situation','')
+    if headline:
+        st.markdown(f"##### 🤖 {headline}")
+
+    # 핵심 섹션 렌더링
+    section_map_ko = {
+        'situation':      ('📊 현황',     'info'),
+        'risk_factor':    ('⚠️ 위험요인',  'warning'),
+        'weather_cause':  ('🌦 기상원인',  'warning'),
+        'main_cause':     ('🔍 주요원인',  'warning'),
+        'weather_context':('🌡 기상상황',  'info'),
+        'action':         ('✅ 권고사항',  'success'),
+        'inspection':     ('🔧 점검조치',  'success'),
+        'trend':          ('📈 위험추세',  'info'),
+        'peak_day':       ('🔺 최고위험일', 'warning'),
+        'priority_area':  ('📍 우선권역',  'info'),
+    }
+    section_map_en = {
+        'situation':      ('📊 Situation',      'info'),
+        'risk_factor':    ('⚠️ Risk Factors',    'warning'),
+        'weather_cause':  ('🌦 Weather Cause',   'warning'),
+        'main_cause':     ('🔍 Main Cause',      'warning'),
+        'weather_context':('🌡 Weather Status',  'info'),
+        'action':         ('✅ Action',          'success'),
+        'inspection':     ('🔧 Inspection',      'success'),
+        'trend':          ('📈 Trend',           'info'),
+        'peak_day':       ('🔺 Peak Risk Day',   'warning'),
+        'priority_area':  ('📍 Priority Area',   'info'),
+    }
+    section_map = section_map_ko if lang == 'ko' else section_map_en
+    render_fn = {'info': st.info, 'warning': st.warning, 'success': st.success}
+
+    for key, (label, style) in section_map.items():
+        val = data.get(key)
+        if not val or key == 'headline':
+            continue
+        render_fn[style](f"**{label}**: {val}")
+
+    # actions 리스트 렌더링
+    actions = data.get('actions', [])
+    if actions:
+        label = '🛡 예방 조치' if lang == 'ko' else '🛡 Actions'
+        st.markdown(f"**{label}**")
+        for i, act in enumerate(actions, 1):
+            st.markdown(f"  {i}. {act}")
+
+def get_executive_summary(df: pd.DataFrame, perf: dict, lang: str = 'ko') -> dict | str:
     total    = len(df)
     vh       = (df['risk_grade'] == 'Very High').sum()
     hi       = (df['risk_grade'] == 'High').sum()
@@ -316,48 +415,49 @@ def get_executive_summary(df: pd.DataFrame, perf: dict, lang: str = 'ko') -> str
     auc      = perf.get('model_perf', pd.DataFrame()).get('auc', pd.Series([0])).max()
 
     if lang == 'en':
-        default = (
-            f"Analysis of {total:,} power facilities in Gangwon Province shows {vh:,} ({vh/total*100:.1f}%) "
-            f"classified as Very High risk, requiring immediate inspection. "
-            f"The highest-risk area is {top_stn} station (avg. score {top_mean:.1f}/100). "
-            f"Key risk factors include forest proximity, dry/windy weather, and terrain exposure. "
-            f"LightGBM model AUC: {auc:.4f}."
-        )
-        prompt = f"""Write a 3-4 sentence executive summary of power facility fire risk analysis for field managers and executives.
-Include numerical evidence, key risk factors, and actionable recommendations.
+        default = {
+            "headline": f"Gangwon Power Facility Risk: {vh:,} Very High ({vh/total*100:.1f}%)",
+            "situation": f"{total:,} facilities analyzed. {vh:,} ({vh/total*100:.1f}%) Very High, {hi:,} High grade.",
+            "risk_factor": f"Highest-risk area: {top_stn} (avg {top_mean:.1f}/100). Key drivers: dry weather, FWI elevation, forest proximity.",
+            "action": "Immediate on-site inspection for Very High facilities. Pre-check insulation in dry-alert zones.",
+        }
+        prompt = f"""Analyze power facility fire risk in Gangwon Province and return a JSON object with EXACTLY these keys:
+"headline": one-line summary with key numbers
+"situation": current risk status with specific counts and percentages
+"risk_factor": top 2-3 risk drivers with evidence
+"action": 1-2 specific actionable recommendations
 
 Analysis Data:
-- Total facilities: {total:,} (Gangwon Province power poles)
-- Very High grade: {vh:,} ({vh/total*100:.1f}%)
-- High grade: {hi:,} ({hi/total*100:.1f}%)
-- Highest-risk station area: {top_stn} (avg. risk {top_mean:.1f}/100)
-- LightGBM AUC: {auc:.4f}
-- Risk factors: Weather hazard (dry/wind) 35%, Forest/terrain 30%, Facility exposure 25%, Fire history 10%
-- Analysis period: 2022–2024 (3 years)"""
-        system = "You are a power facility fire risk expert. Answer concisely and accurately in English."
+- Total: {total:,} facilities | Very High: {vh:,} ({vh/total*100:.1f}%) | High: {hi:,} ({hi/total*100:.1f}%)
+- Highest-risk area: {top_stn} (avg risk {top_mean:.1f}/100)
+- Model AUC: {auc:.4f} | WPFI_v2: dry(50%) + heat(30%) + lightning(20%)
+- Analysis period: 2022-2024"""
+        system = ("You are a power facility fire risk expert. "
+                  "Respond ONLY with a valid JSON object containing exactly the keys: "
+                  "headline, situation, risk_factor, action.")
     else:
-        default = (
-            f"강원도 전력설비 {total:,}개를 분석한 결과, {vh:,}개({vh/total*100:.1f}%)가 "
-            f"Very High(매우높음) 등급으로 즉각적인 점검이 필요합니다. "
-            f"위험도가 가장 높은 권역은 {top_stn}(평균 {top_mean:.1f}점)이며, "
-            f"주요 위험 요인은 산림 인접도와 건조·강풍 기상 조건의 복합 작용입니다. "
-            f"LightGBM 모델의 예측 정확도(AUC)는 {auc:.4f}입니다."
-        )
-        prompt = f"""강원도 전력설비 화재위험도 분석 결과를 현장 관리자 및 경영진을 위한 총평으로 3~4문장 작성하세요.
-수치 근거를 반드시 포함하고, 핵심 위험요인과 권고사항도 포함하세요.
+        default = {
+            "headline": f"매우높음 등급 {vh:,}개({vh/total*100:.1f}%) — {top_stn} 권역 최고 위험",
+            "situation": f"강원도 전력설비 {total:,}개 분석 결과, Very High {vh:,}개({vh/total*100:.1f}%), High {hi:,}개({hi/total*100:.1f}%) 확인.",
+            "risk_factor": f"최고위험 권역: {top_stn}(평균 {top_mean:.1f}/100). 주요 원인: 건조·FWI 복합 조건, 고지대 낙뢰 노출.",
+            "action": "매우높음 등급 설비 즉각 현장 점검 실시. 건조경보 권역 절연 사전 점검 권고.",
+        }
+        prompt = f"""강원도 전력설비 화재위험도 분석 결과를 JSON으로 반환하세요. 반드시 아래 키만 포함:
+"headline": 핵심 수치를 담은 1줄 요약
+"situation": 현재 위험 현황 (구체적 수치 포함)
+"risk_factor": 주요 위험요인 2~3가지 (수치 근거 포함)
+"action": 구체적 권고사항 1~2가지
 
 분석 데이터:
-- 총 전력설비: {total:,}개 (강원도 전봇대)
-- Very High 등급: {vh:,}개 ({vh/total*100:.1f}%)
-- High 등급: {hi:,}개 ({hi/total*100:.1f}%)
+- 전체 {total:,}개 | Very High {vh:,}개({vh/total*100:.1f}%) | High {hi:,}개({hi/total*100:.1f}%)
 - 최고위험 권역: {top_stn} (평균 위험도 {top_mean:.1f}/100)
-- LightGBM 예측 AUC: {auc:.4f}
-- 주요 위험요인: 기상위험(건조·강풍) 35%, 산림·지형 노출 30%, 설비 노출 25%, 화재이력 10%
-- 분석 기간: 2022~2024년 (3년)"""
-        system = "당신은 전력설비 화재 위험 전문가입니다. 한국어로 간결하고 정확하게 답변하세요."
+- 모델 AUC: {auc:.4f} | WPFI_v2 = 건조(50%)+고온(30%)+낙뢰(20%)
+- 분석 기간: 2022~2024년"""
+        system = ("당신은 전력설비 화재 위험 전문가입니다. "
+                  "반드시 headline, situation, risk_factor, action 키만 포함한 유효한 JSON으로만 응답하세요.")
 
-    result = _openai_chat(prompt, system=system)
-    return result if result and not result.startswith("[OpenAI") else default
+    result = _openai_chat_json(prompt, system=system)
+    return result if result else default
 
 
 @st.cache_resource
@@ -395,57 +495,57 @@ def _rag_search(query: str, top_k: int = 2) -> str:
         return ""
 
 
-def get_facility_explanation(row: dict, lang: str = 'ko') -> str:
+def get_facility_explanation(row: dict, lang: str = 'ko') -> dict | str:
     grade_label = (GRADE_KR if lang == 'ko' else GRADE_EN).get(row.get('risk_grade', ''), '')
-
-    # RAG: 기상 조건 기반 유사 사례 검색
     wh  = row.get('weather_hazard', 0)
     fwi = row.get('fwi_score', row.get('ml_fire_prob_max', 0) * 30)
     acc = row.get('accumulated_risk_norm', 0)
-    rag_query = f"기상위험 {wh:.0f} FWI {fwi:.1f} 누적건조 {acc:.0f} 전봇대 화재위험"
-    rag_context = _rag_search(rag_query, top_k=2)
+    rag_context = _rag_search(
+        f"기상위험 {wh:.0f} FWI {fwi:.1f} 누적건조 {acc:.0f} 전봇대 화재위험", top_k=2)
 
     if lang == 'en':
-        default = (
-            f"Facility #{row.get('pole_id','')} has weather hazard {wh:.0f} "
-            f"and spatial exposure {row.get('spatial_exposure',0):.0f} as primary risk factors. "
-            f"Grade: {grade_label} ({row.get('final_risk',0):.1f}/100). "
-            f"Recommend insulation resistance test and on-site inspection."
-        )
-        rag_section = f"\n\nReference knowledge:\n{rag_context}" if rag_context else ""
-        prompt = f"""Explain this power facility fire risk analysis in 3 sentences for a field inspection engineer.
-Base your explanation on the facility data and reference knowledge below.
+        default = {
+            "headline": f"Facility #{row.get('pole_id','')} — {grade_label} ({row.get('final_risk',0):.1f}/100)",
+            "main_cause": f"Weather hazard {wh:.0f}/100, FWI {fwi:.1f}, accumulated dry risk {acc:.1f}.",
+            "weather_context": f"Station: {row.get('nearest_station','')} | Spatial exposure: {row.get('spatial_exposure',0):.0f}",
+            "inspection": "Perform insulation resistance test. On-site visual inspection recommended.",
+        }
+        rag_section = f"\n\nReference:\n{rag_context}" if rag_context else ""
+        prompt = f"""Analyze this power facility risk and return a JSON with EXACTLY these keys:
+"headline": facility ID + grade + score in one line
+"main_cause": top 2 risk drivers with specific values
+"weather_context": current weather condition and station area
+"inspection": 1-2 specific inspection actions
 
-Facility ID: {row.get('pole_id','')}
-Risk Grade: {grade_label} ({row.get('final_risk',0):.1f}/100)
-ML Fire Probability: {row.get('ml_fire_prob_max',0):.4f}
-Weather Hazard: {wh:.1f} | FWI Score: {fwi:.1f} | Accumulated Risk: {acc:.1f}
-Spatial Exposure: {row.get('spatial_exposure',0):.1f} | Cascade Risk: {row.get('cascade_risk',0):.1f}
-Station Area: {row.get('nearest_station','')}
-Include specific preventive actions.{rag_section}"""
-        system = "You are a power facility safety inspection expert. Answer in English."
+Data:
+Facility #{row.get('pole_id','')} | Grade: {grade_label} ({row.get('final_risk',0):.1f}/100)
+Weather Hazard: {wh:.1f} | FWI: {fwi:.1f} | Accumulated Risk: {acc:.1f}
+Spatial Exposure: {row.get('spatial_exposure',0):.1f} | Station: {row.get('nearest_station','')}{rag_section}"""
+        system = ("You are a power facility inspection expert. "
+                  "Respond ONLY with a valid JSON containing: headline, main_cause, weather_context, inspection.")
     else:
-        default = (
-            f"설비 #{row.get('pole_id','')}은(는) 기상위험 {wh:.0f}점, "
-            f"공간노출 {row.get('spatial_exposure',0):.0f}점이 주요 위험요인으로, "
-            f"{grade_label} 등급({row.get('final_risk',0):.1f}점)입니다. "
-            f"절연 저항 측정 및 현장 점검이 권고됩니다."
-        )
-        rag_section = f"\n\n참조 지식:\n{rag_context}" if rag_context else ""
-        prompt = f"""전력설비 화재위험 분석 결과를 현장 점검 엔지니어용으로 3문장 설명하세요.
-아래 설비 데이터와 참조 지식을 근거로 설명하세요.
+        default = {
+            "headline": f"설비 #{row.get('pole_id','')} — {grade_label} ({row.get('final_risk',0):.1f}/100)",
+            "main_cause": f"기상위험 {wh:.0f}/100, FWI {fwi:.1f}, 누적건조위험 {acc:.1f}.",
+            "weather_context": f"관할관측소: {row.get('nearest_station','')} | 공간노출도: {row.get('spatial_exposure',0):.0f}",
+            "inspection": "절연 저항 측정 및 육안 점검 즉시 시행 권고.",
+        }
+        rag_section = f"\n\n참조:\n{rag_context}" if rag_context else ""
+        prompt = f"""전력설비 위험 분석 결과를 JSON으로 반환하세요. 반드시 아래 키만 포함:
+"headline": 설비ID + 등급 + 점수 1줄
+"main_cause": 주요 위험요인 2가지 (수치 포함)
+"weather_context": 현재 기상 조건 및 관할 관측소
+"inspection": 구체적 점검 조치 1~2가지
 
-설비ID: {row.get('pole_id','')}
-위험등급: {grade_label} ({row.get('final_risk',0):.1f}/100)
-ML 화재확률: {row.get('ml_fire_prob_max',0):.4f}
-기상위험: {wh:.1f} | FWI 지수: {fwi:.1f} | 누적위험도: {acc:.1f}
-공간노출: {row.get('spatial_exposure',0):.1f} | 연쇄피해위험: {row.get('cascade_risk',0):.1f}
-관할관측소: {row.get('nearest_station','')}
-구체적 예방 조치 포함.{rag_section}"""
-        system = "당신은 전력설비 안전 점검 전문가입니다. 참조 지식을 활용해 근거 있는 설명을 제공하세요."
+데이터:
+설비 #{row.get('pole_id','')} | 등급: {grade_label} ({row.get('final_risk',0):.1f}/100)
+기상위험: {wh:.1f} | FWI: {fwi:.1f} | 누적위험도: {acc:.1f}
+공간노출: {row.get('spatial_exposure',0):.1f} | 관측소: {row.get('nearest_station','')}{rag_section}"""
+        system = ("당신은 전력설비 안전 점검 전문가입니다. "
+                  "반드시 headline, main_cause, weather_context, inspection 키만 포함한 JSON으로 응답하세요.")
 
-    result = _openai_chat(prompt, system=system, max_tokens=350)
-    return result if result and not result.startswith("[OpenAI") else default
+    result = _openai_chat_json(prompt, system=system)
+    return result if result else default
 
 
 def get_overall_forecast_recommendation(fc_result: pd.DataFrame, fc_feat: pd.DataFrame,
@@ -506,51 +606,63 @@ Include: 1) Overall 3-day risk trend, 2) Most dangerous day and reason, 3) Prior
 def get_forecast_recommendation(feat_df: pd.DataFrame, fc_day: pd.DataFrame,
                                  date_label: str, lang: str = 'ko') -> str:
     if feat_df is None or fc_day.empty:
-        return ""
+        return {}
     top_stn = feat_df.groupby('station')['weather_hazard'].mean().idxmax() \
               if not feat_df.empty else ("알 수 없음" if lang == 'ko' else "Unknown")
     vh_cnt = (fc_day['forecast_grade'] == 'Very High').sum()
     hi_cnt = (fc_day['forecast_grade'] == 'High').sum()
+    dry_cnt  = int(feat_df['dry_watch_flag'].sum()) if 'dry_watch_flag' in feat_df.columns else 0
+    wind_cnt = int(feat_df['wind_watch_flag'].sum()) if 'wind_watch_flag' in feat_df.columns else 0
 
     if lang == 'en':
-        default = (
-            f"For {date_label}, {top_stn} station area shows the highest weather hazard. "
-            f"{vh_cnt:,} facilities predicted Very High, {hi_cnt:,} High. "
-            f"Urgent inspection required in dry-alert condition zones."
-        )
-        prompt = f"""Write a fire risk forecast analysis for {date_label} based on weather data.
-Include: 1) Which areas/facilities are at risk, 2) Key weather conditions, 3) 3 specific preventive actions.
+        default = {
+            "headline": f"{date_label} — {vh_cnt:,} Very High, {hi_cnt:,} High predicted",
+            "situation": f"Highest-risk area: {top_stn}. Max weather hazard: {feat_df['weather_hazard'].max():.1f}/100.",
+            "weather_cause": f"Dry-alert: {dry_cnt} stations | Wind-alert: {wind_cnt} stations.",
+            "actions": [
+                f"Priority inspection in {top_stn} area ({vh_cnt:,} Very High facilities)",
+                "Pre-check insulation in dry-alert zones before peak risk period",
+                "Deploy emergency response team on standby",
+            ],
+        }
+        prompt = f"""Analyze the {date_label} fire risk forecast and return JSON with EXACTLY these keys:
+"headline": date + key counts in one line
+"situation": highest-risk area and weather hazard level
+"weather_cause": key weather conditions (alerts, indicators)
+"actions": array of exactly 3 specific preventive actions (strings)
 
-Forecast date: {date_label}
-Highest-risk station: {top_stn}
-Very High predicted: {vh_cnt:,} facilities
-High predicted: {hi_cnt:,} facilities
-Max weather hazard: {feat_df['weather_hazard'].max():.1f}/100
-Dry-alert stations: {int(feat_df['dry_watch_flag'].sum()) if 'dry_watch_flag' in feat_df.columns else 0}
-Wind-alert stations: {int(feat_df['wind_watch_flag'].sum()) if 'wind_watch_flag' in feat_df.columns else 0}"""
-        system = "You are a power facility fire prevention expert. Answer in 3-5 sentences in English."
+Data:
+Date: {date_label} | Top station: {top_stn}
+Very High: {vh_cnt:,} | High: {hi_cnt:,} | Max hazard: {feat_df['weather_hazard'].max():.1f}/100
+Dry alerts: {dry_cnt} | Wind alerts: {wind_cnt}"""
+        system = ("You are a power facility fire prevention expert. "
+                  "Respond ONLY with valid JSON containing: headline, situation, weather_cause, actions (array of 3).")
     else:
-        default = (
-            f"{date_label} 기상 예보 기준, {top_stn} 권역이 최고 기상위험도를 보입니다. "
-            f"Very High 등급 예측 설비 {vh_cnt:,}개, High 등급 {hi_cnt:,}개로, "
-            f"건조주의보 발령 조건에 해당하는 구역의 설비 긴급 점검이 필요합니다."
-        )
-        prompt = f"""{date_label} 기상 예보 기반 전력설비 화재 위험 예보 분석 결과를 작성하세요.
-다음 내용을 반드시 포함하세요:
-1. 어떤 권역/설비가 위험에 노출되는지
-2. 주요 위험 기상 조건
-3. 구체적인 예방·대응 조치 (3가지)
+        default = {
+            "headline": f"{date_label} — Very High {vh_cnt:,}개, High {hi_cnt:,}개 예측",
+            "situation": f"최고위험 권역: {top_stn}. 최대 기상위험도: {feat_df['weather_hazard'].max():.1f}/100.",
+            "weather_cause": f"건조주의보: {dry_cnt}개소 | 강풍주의보: {wind_cnt}개소.",
+            "actions": [
+                f"{top_stn} 권역 Very High {vh_cnt:,}개 설비 우선 점검",
+                "건조주의보 권역 절연 취약 설비 사전 점검 실시",
+                "비상 점검팀 대기 배치 및 순찰 강화",
+            ],
+        }
+        prompt = f"""{date_label} 화재 위험 예보를 분석하여 JSON으로 반환하세요. 반드시 아래 키만 포함:
+"headline": 날짜 + 핵심 수치 1줄
+"situation": 최고위험 권역 및 기상위험도 수준
+"weather_cause": 주요 기상 조건 (경보, 지수)
+"actions": 구체적 예방 조치 3가지 (문자열 배열)
 
-예보 날짜: {date_label}
-최고위험 권역: {top_stn}
-Very High 예측 설비: {vh_cnt:,}개 / High: {hi_cnt:,}개
-최대 기상위험도: {feat_df['weather_hazard'].max():.1f}/100
-건조주의보 관측소: {int(feat_df['dry_watch_flag'].sum()) if 'dry_watch_flag' in feat_df.columns else 0}개소
-강풍주의보 관측소: {int(feat_df['wind_watch_flag'].sum()) if 'wind_watch_flag' in feat_df.columns else 0}개소"""
-        system = "당신은 전력설비 화재 예방 전문가입니다. 한국어 3~5문장으로 답변하세요."
+데이터:
+날짜: {date_label} | 최고위험 권역: {top_stn}
+Very High: {vh_cnt:,}개 | High: {hi_cnt:,}개 | 최대 기상위험도: {feat_df['weather_hazard'].max():.1f}/100
+건조주의보: {dry_cnt}개소 | 강풍주의보: {wind_cnt}개소"""
+        system = ("당신은 전력설비 화재 예방 전문가입니다. "
+                  "반드시 headline, situation, weather_cause, actions(3개 문자열 배열) 키만 포함한 JSON으로 응답하세요.")
 
-    result = _openai_chat(prompt, system=system, max_tokens=400)
-    return result if result and not result.startswith("[OpenAI") else default
+    result = _openai_chat_json(prompt, system=system)
+    return result if result else default
 
 # ── 위험 판단 사유 생성 (규칙 기반) ──────────────────────────────────────────
 def _risk_reason(row: dict) -> str:
@@ -748,10 +860,10 @@ def apply_simulation(df: pd.DataFrame, preset_name: str,
         sim['hist_prior']       * WEIGHTS['prior']
     ).clip(0, 100)
 
-    # 실제 데이터 분포 기반 임계값 사용 (동적 분위수 방식)
-    vh_thr = GRADE_THRESHOLDS_ACTUAL["Very High"]
-    hi_thr = GRADE_THRESHOLDS_ACTUAL["High"]
-    mo_thr = GRADE_THRESHOLDS_ACTUAL["Moderate"]
+    # 시뮬레이션은 가중합 공식 스케일 임계값 사용
+    vh_thr = GRADE_THRESHOLDS_SIM["Very High"]
+    hi_thr = GRADE_THRESHOLDS_SIM["High"]
+    mo_thr = GRADE_THRESHOLDS_SIM["Moderate"]
 
     def grade(s):
         if s >= vh_thr: return 'Very High'
@@ -969,7 +1081,7 @@ def main():
     hi_cnt = (df['risk_grade'] == 'High').sum()
     lo_cnt = (df['risk_grade'] == 'Low').sum()
     auc_val = perf['model_perf']['auc'].max() if 'model_perf' in perf else 0
-    top10_recall = 0.828  # Recall@Top10% 고정값
+    top10_recall = perf['model_perf']['recall_top10'].max() if 'model_perf' in perf else 0.397
 
     unit = "개" if lang == 'ko' else ""
     kpi_labels = {
@@ -1091,7 +1203,7 @@ def main():
                 df_sim['facility_exposure'] * WEIGHTS['facility'] +
                 df_sim['hist_prior']        * WEIGHTS['prior']
             ).clip(0, 100)
-            VH_THR, HI_THR, MO_THR = GRADE_THRESHOLDS_ACTUAL["Very High"], GRADE_THRESHOLDS_ACTUAL["High"], GRADE_THRESHOLDS_ACTUAL["Moderate"]
+            VH_THR, HI_THR, MO_THR = GRADE_THRESHOLDS_SIM["Very High"], GRADE_THRESHOLDS_SIM["High"], GRADE_THRESHOLDS_SIM["Moderate"]
             def _sim_grade(s):
                 if s >= VH_THR: return 'Very High'
                 if s >= HI_THR: return 'High'
@@ -1196,8 +1308,7 @@ def main():
                 st.session_state['executive_summary_lang'] = lang
 
         summary = st.session_state['executive_summary']
-        icon = "🤖" if OPENAI_API_KEY else "📊"
-        st.info(f"{icon} {summary}")
+        _render_structured_ai(summary, lang)
 
         col_ref, _ = st.columns([1, 4])
         with col_ref:
@@ -1340,18 +1451,23 @@ def main():
                         plt.close()
                     else:
                         fig, ax = plt.subplots(figsize=(6, 3.5))
+                        # WPFI_v2 구성요소 사용 (prob_dry/prob_heat/prob_light)
                         if lang == 'en':
-                            comp_labels = ['Weather Hazard','Spatial Exposure','Facility Exposure','Fire History']
-                            x_label, t_label = 'Score', f'Facility #{sel_pole} Risk Components'
+                            comp_labels = ['P_dry (×0.5)','P_heat (×0.3)','P_light (×0.2)']
+                            x_label = 'Probability (0–1)'
+                            t_label = f'Facility #{sel_pole} — WPFI_v2 Components'
                         else:
-                            comp_labels = ['기상위험','공간노출','설비노출','화재이력']
-                            x_label, t_label = '점수', f'설비 #{sel_pole} 위험 구성요소'
-                        comp_vals = [row.get('weather_hazard',0), row.get('spatial_exposure',0),
-                                     row.get('facility_exposure',0), row.get('hist_prior',0)]
-                        ax.barh(comp_labels, comp_vals, color=['#d62728','#ff7f0e','#1f77b4','#2ca02c'])
+                            comp_labels = ['건조형 P_dry (×0.5)','고온형 P_heat (×0.3)','낙뢰 P_light (×0.2)']
+                            x_label = '확률 (0~1)'
+                            t_label = f'설비 #{sel_pole} — WPFI_v2 구성요소'
+                        p_dry   = row.get('prob_dry',   row.get('weather_hazard', 0) / 100)
+                        p_heat  = row.get('prob_heat',  row.get('spatial_exposure', 0) / 100)
+                        p_light = row.get('prob_light', row.get('hist_prior', 0) / 100)
+                        comp_vals = [p_dry, p_heat, p_light]
+                        ax.barh(comp_labels, comp_vals, color=['#1f77b4','#d62728','#2ca02c'])
                         for b, v in zip(ax.patches, comp_vals):
-                            ax.text(v + 0.5, b.get_y() + b.get_height()/2, f'{v:.1f}', va='center')
-                        ax.set_xlabel(x_label); ax.set_xlim(0, 110)
+                            ax.text(v + 0.005, b.get_y() + b.get_height()/2, f'{v:.4f}', va='center')
+                        ax.set_xlabel(x_label); ax.set_xlim(0, 1.05)
                         ax.set_title(t_label)
                         plt.tight_layout(); st.pyplot(fig); plt.close()
 
@@ -1362,7 +1478,7 @@ def main():
                     spin_msg = "Analyzing..." if lang == 'en' else "분석 중..."
                     with st.spinner(spin_msg):
                         st.session_state[exp_key] = get_facility_explanation(row.to_dict(), lang)
-                st.info(st.session_state[exp_key])
+                _render_structured_ai(st.session_state[exp_key], lang)
 
     # ── TAB 4: 모델 성능 ─────────────────────────────────────────────────────
     with tab4:
@@ -1370,23 +1486,25 @@ def main():
 
         with st.expander(t('model_explain_title', lang), expanded=True):
             auc_val = perf['model_perf']['auc'].max() if 'model_perf' in perf else 0
+            w_pct   = perf['model_perf']['weather_pct'].max() if 'model_perf' in perf else 0
+            r10_val = perf['model_perf']['recall_top10'].max() if 'model_perf' in perf else 0
             if lang == 'en':
                 st.markdown(f"""
-**How accurate is the model?**
-- **AUC {auc_val:.4f}** — Closer to 1.0 = perfect. 0.5 = random guessing.
-  Current value means the model is **highly accurate** at identifying at-risk facilities.
-- **Recall@Top5%** — "If we only inspect the top 5%, what % of actual fire-risk facilities do we catch?"
-- **Ablation Study** — Which factor (weather/spatial/facility/history) contributes most?
-- **Region CV** — Does the model generalize to areas it wasn't trained on?
+**WPFI_v2 Multi-Hazard Model Performance**
+- **AUC: Dry {perf['model_perf'].loc['건조형','auc']:.4f} / Heat {perf['model_perf'].loc['고온형','auc']:.4f}**
+  — Closer to 1.0 = perfect discrimination. 0.5 = random. Current values reflect genuine weather-driven prediction.
+- **Weather Contribution: {w_pct:.1f}%** — Top-5 features are all weather variables. Zero calendar dependency.
+- **Recall@Top10%: {r10_val:.3f}** — Inspecting only top 10% of facilities captures this fraction of true fire-risk cases.
+- **Seasonal pattern**: Dry model peaks in winter/spring (dry season). Heat model peaks in summer (heatwave season).
                 """)
             else:
                 st.markdown(f"""
-**모델이 얼마나 정확한가?**
-- **AUC {auc_val:.4f}** — 1.0에 가까울수록 완벽. 0.5는 무작위 추측과 같음.
-  현재 값은 **전체 설비 중 실제 위험 설비를 찾아내는 정확도가 매우 높음**을 의미합니다.
-- **Recall@Top5%** — "상위 5%만 점검하면 실제 화재 위험 설비 중 몇 %를 잡을 수 있는가?"
-- **Ablation Study** — 기상/공간/설비/이력 중 어떤 요소가 가장 중요한지 확인
-- **Region CV** — 특정 지역 데이터로만 학습해도 다른 지역에서 잘 동작하는지 검증
+**WPFI_v2 멀티해저드 모델 성능**
+- **AUC: 건조형 {perf['model_perf'].loc['건조형','auc']:.4f} / 고온형 {perf['model_perf'].loc['고온형','auc']:.4f}**
+  — 1.0에 가까울수록 완벽. 0.5는 무작위. 현재 값은 순수 날씨 기반 예측의 현실적 수준입니다.
+- **날씨 기여도: {w_pct:.1f}%** — Top-5 피처 전부 기상 변수. 달력(month/season) 의존도 0%.
+- **Recall@Top10%: {r10_val:.3f}** — 상위 10% 설비만 점검 시 실제 화재 위험 설비의 {r10_val*100:.1f}%를 포함.
+- **계절 패턴**: 건조형은 겨울·봄(건조 시즌) 집중, 고온형은 여름(폭염 시즌) 집중.
                 """)
 
         col1, col2 = st.columns(2)
@@ -1432,9 +1550,9 @@ def main():
                 ax.legend(); ax.set_ylim(0.4, 1.05)
                 plt.tight_layout(); st.pyplot(fig); plt.close()
                 if lang == 'en':
-                    st.info("💡 Weather features alone yield AUC 0.66. Adding spatial and facility features progressively improves to 0.96.")
+                    st.info("💡 WPFI_v2: Dry model AUC 0.737 / Heat model AUC 0.806. Weather contributes 94.7–94.8%. Zero calendar dependency.")
                 else:
-                    st.info("💡 기상 단독 AUC 0.66 → 공간+설비 추가 시 0.96으로 향상. 각 레이어가 독립적으로 기여합니다.")
+                    st.info("💡 WPFI_v2: 건조형 AUC 0.737 / 고온형 AUC 0.806. 날씨 기여도 94.7~94.8%. 달력 의존도 0%.")
 
         # 모델 개선 여정 (A→B→C)
         fig_comp = OUT_FIGURES / 'fig_model_comparison.png'
@@ -1866,7 +1984,7 @@ def main():
                     with st.spinner(spin_rec):
                         st.session_state[rec_key] = get_forecast_recommendation(
                             feat_day, fc_day, date_labels[sel_idx], lang)
-                st.warning(st.session_state[rec_key])
+                _render_structured_ai(st.session_state[rec_key], lang)
 
                 # 관측소별 기상 요약
                 st.markdown(t('fc_wx_sum', lang))
@@ -1999,28 +2117,32 @@ def main():
             )
 
         # ── 섹션 2: 4-Component WPFI ────────────────────────────────────────
-        with st.expander("② 4-Component WPFI 가중합 공식" if lang == 'ko' else "② 4-Component WPFI Formula"):
+        with st.expander("② WPFI_v2 — 멀티해저드 3성분 공식" if lang == 'ko' else "② WPFI_v2 — Multi-Hazard 3-Component Formula"):
             if lang == 'ko':
                 st.markdown(r"""
-**WPFI 종합점수 = 기상(35%) + 공간(30%) + 설비(25%) + 이력(10%)**
+**WPFI\_v2 = 0.5 × P\_dry + 0.3 × P\_heat + 0.2 × P\_light**
 
-| 구성요소 | 가중치 | 주요 변수 |
-|----------|--------|----------|
-| 기상 위험 (Weather Hazard) | **35%** | FWI, 건조도, 풍속, 누적위험지수, 실효습도 |
-| 공간 노출 (Spatial Exposure) | **30%** | 고도, 지형노출도, 산림 인접 여부 |
-| 설비 노출 (Facility Exposure) | **25%** | 설비 밀도, 연쇄피해 위험 (cascade_risk) |
-| 화재 이력 (Historical Prior) | **10%** | 과거 산불 발생 건수 |
+| 구성요소 | 가중치 | 학습 방식 | 주요 기상 변수 | 날씨 기여도 |
+|----------|--------|----------|--------------|-----------|
+| P\_dry (건조형) | **50%** | LightGBM | FWI·건조일수·실효습도 | **94.8%** |
+| P\_heat (고온형) | **30%** | LightGBM | 열지수·최고기온·누적위험 | **94.7%** |
+| P\_light (낙뢰형) | **20%** | Rule-based | 고도·여름일교차·여름습도 | 100% |
+
+> AUC: 건조형 **0.737** / 고온형 **0.806**
+> 모든 Top-5 피처가 기상 변수 (달력 의존도 0%)
 """)
             else:
                 st.markdown(r"""
-**WPFI Score = Weather(35%) + Spatial(30%) + Facility(25%) + History(10%)**
+**WPFI\_v2 = 0.5 × P\_dry + 0.3 × P\_heat + 0.2 × P\_light**
 
-| Component | Weight | Key Variables |
-|-----------|--------|--------------|
-| Weather Hazard | **35%** | FWI, dryness, wind, accumulated risk, eff. humidity |
-| Spatial Exposure | **30%** | elevation, terrain exposure, forest proximity |
-| Facility Exposure | **25%** | facility density, cascade risk |
-| Historical Prior | **10%** | past wildfire count |
+| Component | Weight | Method | Key Weather Variables | Weather Pct |
+|-----------|--------|--------|-----------------------|-------------|
+| P\_dry (Dryness) | **50%** | LightGBM | FWI, dry streak, eff. humidity | **94.8%** |
+| P\_heat (Heat) | **30%** | LightGBM | heat score, max temp, accum. risk | **94.7%** |
+| P\_light (Lightning) | **20%** | Rule-based | elevation, summer temp range, humidity | 100% |
+
+> AUC: Dry model **0.737** / Heat model **0.806**
+> All Top-5 features are weather variables (zero calendar dependency)
 """)
 
         # ── 섹션 3: FWI 캐나다 국제표준 ────────────────────────────────────

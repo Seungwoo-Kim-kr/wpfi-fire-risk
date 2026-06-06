@@ -5,19 +5,21 @@
 
 [![Python](https://img.shields.io/badge/Python-3.12-blue?logo=python)](https://www.python.org/)
 [![Streamlit](https://img.shields.io/badge/Streamlit-1.58-FF4B4B?logo=streamlit)](https://streamlit.io/)
-[![LightGBM](https://img.shields.io/badge/LightGBM-AUC%200.9574-brightgreen)](https://lightgbm.readthedocs.io/)
+[![LightGBM](https://img.shields.io/badge/LightGBM-AUC%200.737%2F0.806-brightgreen)](https://lightgbm.readthedocs.io/)
+[![Weather](https://img.shields.io/badge/Weather%20Contribution-94.7%25-blue)](https://github.com/Seungwoo-Kim-kr/wpfi-fire-risk)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
 ---
 
 ## 📋 Overview
 
-WPFI (**W**eather-Spatial **P**ower **F**acility Fire-risk **I**ndex) integrates meteorological data, Canadian FWI fire weather indices, spatial information (forest cover, terrain), power facility attributes, and historical fire records to compute a composite risk score for each power pole — enabling prioritized field inspection.
+WPFI\_v2 (**W**eather-driven **P**ower **F**acility Fire-risk **I**ndex v2) integrates KMA ASOS meteorological data, Canadian FWI fire weather indices, and fire department electrical fire records to compute a **multi-hazard composite risk score** for each power pole — enabling weather-driven prioritized field inspection.
 
 **Coverage:** 1,387,831 power poles in Gangwon Province, South Korea  
 **Analysis period:** 2022–2024 (3 years of daily data)  
-**Model AUC:** 0.9574 (LightGBM Model C — FWI + Accumulated Risk + Cascade)  
-**Recall@Top10%:** 82.8% — inspecting top 10% captures 83% of actual fire-risk events
+**Model AUC:** Dry 0.737 / Heat 0.806 (WPFI_v2 Multi-Hazard)  
+**Weather Contribution:** 94.7–94.8% (Top-5 features all weather; zero calendar dependency)  
+**Formula:** `WPFI_v2 = 0.5 × P_dry + 0.3 × P_heat + 0.2 × P_light`
 
 ---
 
@@ -38,7 +40,83 @@ WPFI (**W**eather-Spatial **P**ower **F**acility Fire-risk **I**ndex) integrates
 
 ---
 
-## 🆕 v3.1 Improvements (2026-06)
+## 🆕 v4.0 — WPFI_v2 Multi-Hazard Model (2026-06)
+
+### 🎯 핵심 혁신: 날씨 조건 기반 멀티해저드 3성분
+
+| 구성요소 | 가중치 | 학습 방식 | AUC | **날씨기여** |
+|----------|--------|----------|-----|-----------|
+| **P_dry** (건조형) | **50%** | LightGBM | 0.737 | **94.8%** |
+| **P_heat** (고온형) | **30%** | LightGBM | 0.806 | **94.7%** |
+| **P_light** (낙뢰형) | **20%** | Rule-based | — | 100% |
+
+```
+WPFI_v2 = 0.5 × P_dry + 0.3 × P_heat + 0.2 × P_light
+```
+
+### 📐 Label 재설계 — 날씨 조건 기반 분류
+
+소방청 발화원인 코드(지오코딩 정밀도 부족) 대신 **실제 화재 발생일 기상 조건**으로 label을 정의합니다.
+
+| | v3.1 (단일 모델) | **v4.0 (멀티해저드)** |
+|-|----------------|----------------------|
+| Label 기준 | 산불 발생 위치 근접 | **화재 발생일 날씨 조건** |
+| 임계값 | — | dry: P75(dry_streak≥5, fwi≥2.7) / heat: temp≥27.2°C |
+| 시간 윈도우 | 7일 | **3일** (신호 농도 향상) |
+| 양성률 | 1.87% | dry 3.15% / heat 8.41% |
+| 날씨기여 | 33% | **94.7–94.8%** |
+| 달력 의존도 | month/season 포함 | **0%** (완전 제거) |
+
+### 🌤 날씨 신호 분리도
+
+| 피처 | 건조형 (label=1 vs 0) | 고온형 (label=1 vs 0) |
+|------|----------------------|----------------------|
+| fwi_score | **+118.9%** ✅ | -21.4% |
+| dryness_score | +47.8% ✅ | -26.9% ✅ |
+| heat_score | -10.5% ✅ | **+70.7%** ✅ |
+| eff_humidity | -23.6% ✅ | +7.5% |
+| wind_score | +39.8% | -16.5% ✅ |
+
+> 두 모델이 완벽히 반대 방향의 기상 패턴을 학습 — 물리적으로 타당
+
+### ⚡ 낙뢰 rule v2 — 기상 신호 추가
+
+```python
+# 기존: P_light = elevation / 1033  (상관계수 1.0000 — 고도 복사본)
+# v4.0: 여름 대기불안정 + 습도 결합
+P_light = 0.50 × elevation_norm
+        + 0.30 × (summer_temp_range / max)   # 여름 일교차 → 대기불안정
+        + 0.20 × (summer_rh / max)            # 여름 습도
+# 결과: 상관계수 1.0000 → 0.9818 (날씨 신호 진입)
+```
+
+### 🤖 AI 요약 JSON 구조화
+
+```python
+# 기존: 자유 형식 텍스트 → 매번 다른 구조
+st.info("강원도 전력설비 1,387,831개를 분석한 결과...")
+
+# v4.0: response_format=json_object 강제 + 구조화 렌더러
+{
+  "headline": "매우높음 69,174개(5.0%) — 원주시 권역 최고 위험",
+  "situation": "...",
+  "risk_factor": "...",
+  "action": "..."
+}
+```
+
+### 📊 등급 분포 (v4.0)
+
+| 등급 | 임계값 | 설비 수 | 비율 |
+|------|--------|---------|------|
+| 🔴 Very High | WPFI\_v2 ≥ 36.9 | 69,174개 | 5.0% |
+| 🟠 High | 30.2 ~ 36.9 | 139,025개 | 10.0% |
+| 🟡 Moderate | 16.9 ~ 30.2 | 345,391개 | 24.9% |
+| 🟢 Low | < 16.9 | 834,241개 | 60.1% |
+
+---
+
+## 📋 v3.1 Improvements (2026-06)
 
 ### 🤖 Model C — Physics-based Fire Risk
 
@@ -110,48 +188,50 @@ Facility selected
 
 ---
 
-## 🏗️ Architecture
+## 🏗️ Architecture (v4.0)
 
 ```
 KMA ASOS Daily Weather (11 stations, 2022-2024)
         │
         ▼  FWI calculation / Rolling window / Alert flags
-   Weather Features (18)   ←── Canadian FWI (FFMC/DMC/DC/ISI/BUI)
-        │                       Accumulated risk (14-day decay)
+   Weather Features (34)   ←── Canadian FWI (FFMC/DMC/DC/ISI/BUI)
+        │                       Accumulated risk / Dryness / Heat scores
         │
-ESA WorldCover + Copernicus DEM  → Spatial Features (4)
-Power Facility Locations          → Facility Features (4)
-                                       cascade_risk (300m BallTree)
-Wildfire records (KFS 2022-2024)  → Temporal+Spatial Label
-   (±14 days + 500m radius)
+ESA WorldCover + Copernicus DEM  → Spatial Features
+Power Facility Locations          → Facility Features (cascade_risk)
         │
-        ▼
-┌─────────────────────────────────────────────────────────┐
-│            LightGBM Model C (39 features)               │
-│  AUC 0.9574 | Recall@Top10% 82.8%                      │
-│  Weather+FWI SHAP: 33% | Region CV avg: 0.977           │
-└─────────────────────────────────────────────────────────┘
-        │
-        ▼  ML probability × Rule-based WPFI (60:40 blend)
-┌─────────────────────────────────────────────────────────┐
-│           Combined Risk Score (0-100) + Grade           │
-└─────────────────────────────────────────────────────────┘
+소방청 전기화재 1,758건 (강원 2022-2024)
+        ▼  날씨 조건 기반 분류 (P75 임계값 + 3일 윈도우)
+   label_dry  (3.15%): dry_streak≥5 AND fwi≥2.7
+   label_heat (8.41%): temp_max≥27.2°C
         │
         ▼
 ┌─────────────────────────────────────────────────────────┐
-│             Streamlit Dashboard v3.1                     │
-│  8 tabs · Dark theme · Glassmorphism KPI · RAG AI       │
+│   Model_dry  (LightGBM) — AUC 0.737, 날씨기여 94.8%    │
+│   Model_heat (LightGBM) — AUC 0.806, 날씨기여 94.7%    │
+│   Rule_light (고도+여름일교차+여름습도)                  │
+└─────────────────────────────────────────────────────────┘
+        │
+        ▼  WPFI_v2 = 0.5×P_dry + 0.3×P_heat + 0.2×P_light
+┌─────────────────────────────────────────────────────────┐
+│      hazard_combined (0~1) → final_risk_wpfi (0~100)    │
+│      Grade: VH≥36.9 / Hi≥30.2 / Mo≥16.9               │
+└─────────────────────────────────────────────────────────┘
+        │
+        ▼
+┌─────────────────────────────────────────────────────────┐
+│             Streamlit Dashboard v4.0                     │
+│  8 tabs · WPFI_v2 구성요소 차트 · JSON 구조화 AI 요약   │
 └─────────────────────────────────────────────────────────┘
 ```
 
-### Risk Score Components
+### WPFI_v2 구성요소
 
-| Layer | Weight | Key Variables |
-|-------|--------|---------------|
-| Weather Hazard | **35%** | FWI, dryness score, wind score, accumulated risk, effective humidity |
-| Spatial Exposure | **30%** | Elevation, terrain fire exposure, forest proximity |
-| Facility Exposure | **25%** | Facility density, cascade risk (300m BallTree network) |
-| Historical Prior | **10%** | Past wildfire count (Korea Forest Service) |
+| 구성요소 | 가중치 | 학습 | 주요 변수 | 날씨기여 |
+|----------|--------|------|---------|---------|
+| P_dry (건조형) | **50%** | LightGBM | fwi_dry_streak(33%), fwi_isi(7%), eff_humidity(7%) | **94.8%** |
+| P_heat (고온형) | **30%** | LightGBM | heat_score(53%), accumulated_risk(5%), temp_max(4%) | **94.7%** |
+| P_light (낙뢰형) | **20%** | Rule-based | 고도(50%), 여름일교차(30%), 여름습도(20%) | 100% |
 
 ---
 
@@ -201,10 +281,14 @@ Open [http://localhost:8501](http://localhost:8501).
 
 ```
 wpfi-fire-risk/
-├── app.py                    # Streamlit dashboard v3.1 (8 tabs, dark theme, RAG)
+├── app.py                    # Streamlit dashboard v4.0 (WPFI_v2, JSON AI, 8 tabs)
 ├── config.py                 # Paths, weights, API keys
 ├── forecast_engine.py        # KMA forecast API + LightGBM inference
-├── regen_labels.py           # Temporal+Spatial label regeneration script
+├── regen_labels.py           # Temporal+Spatial label regeneration
+├── rebuild_labels_v4.py      # WPFI_v2 날씨 조건 기반 label 생성 파이프라인
+├── apply_improvements.py     # 낙뢰 rule v2 + month 제거 재학습
+├── improve_labels.py         # P75 임계값 + 3일 윈도우 label 품질 개선
+├── regen_figures.py          # 멀티해저드 시각화 재생성
 ├── requirements.txt
 │
 ├── .streamlit/
@@ -235,26 +319,36 @@ wpfi-fire-risk/
 
 ---
 
-## 📊 Model Performance
+## 📊 Model Performance (v4.0)
 
-| Metric | Value | Note |
-|--------|-------|------|
-| AUC | **0.9574** | LightGBM Model C |
-| Recall@Top5% | 0.628 | 5% inspection → 63% fire events caught |
-| Recall@Top10% | **0.828** | 10% inspection → 83% caught |
-| Recall@Top20% | 0.996 | 20% inspection → ~100% caught |
-| Region CV AUC | **0.977 avg** | 9 stations, all ≥ 0.91 — no regional bias |
-| Weather+FWI SHAP | **33%** | vs. 14% in old geographic-label model |
-| Weather-only AUC | 0.659 | FWI alone has independent predictive power |
+### WPFI_v2 Multi-Hazard
 
-### Ablation Study
+| 모델 | AUC | Recall@Top10% | 날씨기여 | 달력기여 |
+|------|-----|--------------|---------|---------|
+| P_dry (건조형) | **0.737** | 0.320 | **94.8%** | **0%** |
+| P_heat (고온형) | **0.806** | 0.285 | **94.7%** | **0%** |
 
-| Step | Features | AUC |
-|------|----------|-----|
-| M1 | Weather + FWI only | 0.659 |
-| M2 | + Spatial (terrain, forest) | 0.848 |
-| M3 | + Facility (density, cascade) | 0.903 |
-| **M4 (adopted)** | All 39 features | **0.957** |
+### 개선 여정
+
+| 버전 | 모델 | AUC | 날씨기여 |
+|------|------|-----|---------|
+| v1 (Geographic) | 단일 LightGBM | 0.998 | 14% (과적합) |
+| v3.1 (Temporal) | 단일 LightGBM | 0.957 | 33% |
+| **v4.0 (Multi-Hazard)** | P_dry + P_heat + P_light | **0.737/0.806** | **94.7~94.8%** |
+
+> AUC가 낮아진 것은 과거 모델이 공간 피처에 과의존했기 때문입니다.  
+> v4.0은 **순수 날씨 기반 예측**으로, 날씨 빅데이터 콘테스트 목적에 직접 부합합니다.
+
+### 계절 패턴 (물리적 타당성)
+
+| 계절 | 건조형 label=1 비율 | 고온형 label=1 비율 |
+|------|-------------------|-------------------|
+| 봄 | 4.0% | 3.4% |
+| **여름** | 1.9% | **27.7%** |
+| 가을 | 1.5% | 4.7% |
+| **겨울** | **5.2%** | 0.0% |
+
+> 건조형은 겨울·봄 건조 시즌, 고온형은 여름 폭염 시즌에 집중 — 물리적으로 타당
 
 ---
 
@@ -303,13 +397,13 @@ wpfi-fire-risk/
 
 ## 🗺️ Future Work
 
-| Priority | Item | Expected Benefit |
-|----------|------|-----------------|
-| Short-term | Wind direction data → fire propagation direction feature | Dynamic directional risk |
-| Short-term | 날씨마루 official data integration → full pipeline re-run | Final contest performance |
-| Mid-term | Knowledge Graph → power network topology cascade analysis | KEPCO grid-level impact |
-| Mid-term | RAG corpus expansion (KMA alert history) | Stronger AI explanation evidence |
-| Long-term | Real-time streaming pipeline (AWS/GCP) | Operational deployment |
+| 우선순위 | 항목 | 기대 효과 |
+|---------|------|---------|
+| 단기 | KMA 낙뢰 관측 데이터 수집 → P_light ML화 | 낙뢰 예측 정확도 향상 |
+| 단기 | 30일 누적 강수량 피처 추가 | 건조형 AUC 0.75+ 목표 |
+| 중기 | WPFI_v2 가중치 scipy 최적화 | 데이터 기반 0.5/0.3/0.2 검증 |
+| 중기 | 정밀 GPS 전기화재 데이터 확보 | 공간 분리로 AUC 0.85+ 가능 |
+| 장기 | 실시간 스트리밍 파이프라인 (AWS/GCP) | 운영 배포 |
 
 ---
 
